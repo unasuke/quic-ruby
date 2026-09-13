@@ -28,6 +28,7 @@ extern VALUE rb_eQUICErrorDropConn;
 extern VALUE rb_eQUICErrorRetry;
 extern VALUE rb_eQUICErrorClosed;
 extern VALUE rb_eQUICErrorCryptoError;
+extern VALUE rb_eQUICErrorCertificateVerifyFailed;
 extern VALUE rb_eQUICErrorHandshakeTimeout;
 extern VALUE rb_eQUICErrorFlowControl;
 extern VALUE rb_eQUICErrorUnknown;

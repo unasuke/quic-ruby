@@ -19,6 +19,15 @@ module QUIC
     end
 
     class CryptoError < Error
+      # The TLS alert this client sent when the handshake failed in
+      # #read_pkt, or nil. Alerts received from the peer are not recorded.
+      attr_reader tls_alert: Integer?
+    end
+
+    class CertificateVerifyFailed < CryptoError
+      # X509_V_ERR_* (comparable with OpenSSL::X509::V_ERR_*), or nil when
+      # the server sent no certificate.
+      attr_reader verify_result: Integer?
     end
 
     class HandshakeTimeout < Error
@@ -69,6 +78,9 @@ module QUIC
     attr_reader handshake_timeout: Integer
     attr_reader no_pmtud: bool
     attr_reader alpn: Array[String]
+    attr_reader verify_mode: :peer | :none
+    attr_reader ca_file: (String | _ToPath)?
+    attr_reader ca_path: (String | _ToPath)?
 
     def self.default: () -> Settings
   end

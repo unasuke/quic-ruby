@@ -10,6 +10,12 @@
 #   QUIC_ECHO_HOST  (default 127.0.0.1)
 #   QUIC_ECHO_PORT  (default 4433)
 #   QUIC_ECHO_ALPN  (default perf)
+#   QUIC_ECHO_CA_FILE (default unset: the server certificate is not verified)
+#
+# The echo server usually runs with a self-signed certificate, so
+# verification is off unless QUIC_ECHO_CA_FILE names a CA to trust. When it
+# is set, the certificate must match QUIC_ECHO_HOST, which means an IP SAN
+# of 127.0.0.1 with the default host.
 #
 # Run with: bundle exec ruby examples/echo_demo.rb
 
@@ -20,12 +26,18 @@ require "socket"
 TARGET_HOST = ENV.fetch("QUIC_ECHO_HOST", "127.0.0.1")
 TARGET_PORT = Integer(ENV.fetch("QUIC_ECHO_PORT", "4433"))
 TARGET_ALPN = ENV.fetch("QUIC_ECHO_ALPN", "perf")
+TARGET_CA_FILE = ENV["QUIC_ECHO_CA_FILE"]
 
 addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
 sock = UDPSocket.new
 sock.connect(addr.ip_address, addr.ip_port)
 
 settings = QUIC::Settings.default.with(alpn: [TARGET_ALPN])
+settings = if TARGET_CA_FILE.nil? || TARGET_CA_FILE.empty?
+  settings.with(verify_mode: :none)
+else
+  settings.with(ca_file: TARGET_CA_FILE)
+end
 client = QUIC::Connection::Client._open(
   local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
   remote_sockaddr: addr.to_sockaddr,
