@@ -52,20 +52,16 @@ rescue NameError
   abort "unknown query type: #{QUERY_TYPE}"
 end
 
-# Resolve the resolver's own address once and hand the same sockaddr to both
-# _open and the socket. See examples/handshake_demo.rb for why a second,
-# independent resolution would make ngtcp2 drop every reply.
-addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
-sock = UDPSocket.new
-sock.connect(addr.ip_address, addr.ip_port)
-
-client = QUIC::Connection::Client._open(
-  local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
-  remote_sockaddr: addr.to_sockaddr,
-  server_name: TARGET_HOST,
-  transport_params: QUIC::TransportParams.default,
+# Pin the lookup to one IPv4 address and connect the socket to the address
+# the client resolved, so both talk to the same peer. See
+# examples/handshake_demo.rb for why that matters.
+client = QUIC::Connection::Client.new(
+  host: TARGET_HOST, port: TARGET_PORT, address_family: :inet,
   settings: QUIC::Settings.default.with(alpn: ["doq"])
 )
+addr = client.remote_address
+sock = UDPSocket.new(Socket::AF_INET)
+sock.connect(addr.ip_address, addr.ip_port)
 
 puts "resolver: #{TARGET_HOST} (#{addr.ip_address}:#{addr.ip_port}), alpn doq"
 puts "query:    #{QUERY_NAME} #{QUERY_TYPE}"
@@ -88,9 +84,10 @@ stream = client.open_bidi_stream
 stream.write([wire.bytesize].pack("n") + wire, fin: true)
 puts "sent #{wire.bytesize} bytes on stream #{stream.id}, half-closed"
 
-# The server answers and closes its side, so read until EOF.
+# The server answers and closes its side, so read until EOF. With no length,
+# Stream#read returns everything received, or an empty String if nothing was.
 response = stream.read
-abort "resolver closed the stream without a response" if response.nil? || response.bytesize < 2
+abort "resolver closed the stream without a response" if response.bytesize < 2
 
 length = response.unpack1("n")
 body = response.byteslice(2, length)

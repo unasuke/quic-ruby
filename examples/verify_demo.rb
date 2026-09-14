@@ -17,9 +17,8 @@
 #   VERIFY_ALPN     (default h3)
 #   VERIFY_CA_FILE  (default unset: step 4 is skipped)
 #
-# Like examples/handshake_demo.rb, this resolves the host once and hands the
-# same sockaddr to both the socket and Client._open, so the connection path
-# and the socket's peer always agree.
+# Each attempt connects its socket to the address its client resolved, so
+# both talk to the same peer (see examples/handshake_demo.rb).
 #
 # Run with: bundle exec ruby examples/verify_demo.rb
 
@@ -33,8 +32,6 @@ TARGET_HOST = ENV.fetch("VERIFY_HOST", "cloudflare-quic.com")
 TARGET_PORT = Integer(ENV.fetch("VERIFY_PORT", "443"))
 TARGET_ALPN = ENV.fetch("VERIFY_ALPN", "h3")
 TARGET_CA_FILE = ENV["VERIFY_CA_FILE"]
-
-ADDR = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
 
 # A self-signed CA that no real server chains to, written as PEM into dir.
 def write_untrusted_ca(dir)
@@ -62,22 +59,20 @@ def verify_result_name(value)
 end
 
 def handshake(label, settings)
-  sock = UDPSocket.new
-  sock.connect(ADDR.ip_address, ADDR.ip_port)
-  client = QUIC::Connection::Client._open(
-    local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
-    remote_sockaddr: ADDR.to_sockaddr,
-    server_name: TARGET_HOST,
-    transport_params: QUIC::TransportParams.default,
-    settings: settings
+  client = QUIC::Connection::Client.new(
+    host: TARGET_HOST, port: TARGET_PORT, address_family: :inet, settings: settings
   )
+  addr = client.remote_address
+  sock = UDPSocket.new(Socket::AF_INET)
+  sock.connect(addr.ip_address, addr.ip_port)
 
-  puts "== #{label}"
+  puts "== #{label} (#{addr.ip_address}:#{addr.ip_port})"
   puts "   verify_mode=#{settings.verify_mode.inspect} ca_file=#{settings.ca_file.inspect} ca_path=#{settings.ca_path.inspect}"
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   client.bind(sock).run
   elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round(1)
   puts "   handshake completed (#{elapsed_ms}ms)"
+  client.close
 rescue QUIC::Error::CertificateVerifyFailed => e
   puts "   #{e.class}: #{e.message}"
   puts "   verify_result=#{e.verify_result.inspect} (#{verify_result_name(e.verify_result)})"
@@ -92,7 +87,7 @@ ensure
 end
 
 puts "libcrypto: #{QUIC.library_versions[:openssl]}"
-puts "Target: #{TARGET_HOST} (#{ADDR.ip_address}:#{ADDR.ip_port}), alpn #{TARGET_ALPN}"
+puts "Target: #{TARGET_HOST}:#{TARGET_PORT}, alpn #{TARGET_ALPN}"
 puts
 
 base = QUIC::Settings.default.with(alpn: [TARGET_ALPN])

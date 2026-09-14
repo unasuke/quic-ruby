@@ -28,23 +28,21 @@ TARGET_PORT = Integer(ENV.fetch("QUIC_ECHO_PORT", "4433"))
 TARGET_ALPN = ENV.fetch("QUIC_ECHO_ALPN", "perf")
 TARGET_CA_FILE = ENV["QUIC_ECHO_CA_FILE"]
 
-addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
-sock = UDPSocket.new
-sock.connect(addr.ip_address, addr.ip_port)
-
 settings = QUIC::Settings.default.with(alpn: [TARGET_ALPN])
 settings = if TARGET_CA_FILE.nil? || TARGET_CA_FILE.empty?
   settings.with(verify_mode: :none)
 else
   settings.with(ca_file: TARGET_CA_FILE)
 end
-client = QUIC::Connection::Client._open(
-  local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
-  remote_sockaddr: addr.to_sockaddr,
-  server_name: TARGET_HOST,
-  transport_params: QUIC::TransportParams.default,
-  settings: settings
+
+# Connect the socket to the address the client resolved, so both talk to the
+# same peer (see examples/handshake_demo.rb).
+client = QUIC::Connection::Client.new(
+  host: TARGET_HOST, port: TARGET_PORT, address_family: :inet, settings: settings
 )
+addr = client.remote_address
+sock = UDPSocket.new(Socket::AF_INET)
+sock.connect(addr.ip_address, addr.ip_port)
 client.bind(sock).run
 
 stream = client.open_bidi_stream
@@ -58,4 +56,5 @@ response = stream.read
 puts "received #{response.bytesize} bytes:"
 puts response
 
+client.close
 sock.close
