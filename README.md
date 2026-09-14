@@ -46,7 +46,13 @@ client.handshake_completed? # => true
 
 Pinning the address family and connecting the socket to `client.remote_address` keeps the socket and ngtcp2's connection path on the same peer address; resolving the host name twice could otherwise pick different DNS records.
 
-More complete programs live in [`examples/`](examples/): [`handshake_demo.rb`](examples/handshake_demo.rb) prints the library versions and times a handshake, [`echo_demo.rb`](examples/echo_demo.rb) exchanges data on a stream, [`doq_demo.rb`](examples/doq_demo.rb) sends a DNS over QUIC query, and [`verify_demo.rb`](examples/verify_demo.rb) tries the certificate verification settings below against a public server.
+More complete programs live in [`examples/`](examples/):
+
+- [`handshake_demo.rb`](examples/handshake_demo.rb): prints the library versions and times a handshake.
+- [`echo_demo.rb`](examples/echo_demo.rb): exchanges data on a stream with a local echo server.
+- [`doq_demo.rb`](examples/doq_demo.rb): sends a DNS over QUIC query.
+- [`io_loop_demo.rb`](examples/io_loop_demo.rb): sends the same query from an I/O loop the script owns, calling `#write_pkt` / `#read_pkt` / `#handle_expiry` itself.
+- [`verify_demo.rb`](examples/verify_demo.rb): tries the certificate verification settings described below against a public server.
 
 ### Certificate verification
 
