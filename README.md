@@ -15,7 +15,7 @@ gem "quic"
 The gem is built from source at install time, so the host needs:
 
 - OpenSSL 1.1.1 or later, **with its development package** (`libssl-dev`, `openssl-devel`, …). LibreSSL works too — see below.
-- `autoconf`, `automake`, `libtool`, `pkg-config` and a C toolchain, to build ngtcp2.
+- `autoconf`, `automake`, `libtool`, `pkg-config` and a C11 compiler, to build ngtcp2.
 - either `patch` or `git`, to apply the picotls patch in `ext/quic/patches/` (`mini_portile2` uses `git apply` when `git` is available and falls back to `patch -p1`).
 
 OpenSSL is located through `pkg-config`. If it lives somewhere `pkg-config` does not look, point at the prefix:

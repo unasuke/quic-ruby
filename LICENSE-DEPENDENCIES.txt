@@ -9,7 +9,7 @@ bundled nor redistributed. The quic gem itself is MIT licensed; see
 LICENSE.txt.
 
 
-ngtcp2 1.22.1 -- https://github.com/ngtcp2/ngtcp2
+ngtcp2 1.25.0 -- https://github.com/ngtcp2/ngtcp2
 -------------------------------------------------
 
 The MIT License
@@ -42,46 +42,18 @@ Portions of ngtcp2
 ngtcp2 embeds code derived from other projects. Those files are compiled into
 the statically linked libngtcp2 and are covered by their own terms:
 
-  * lib/ngtcp2_window_filter.c and lib/ngtcp2_window_filter.h were translated
-    to C from Chromium/quiche windowed_filter.h and carry "Copyright (c) 2016
-    The Chromium Authors. All rights reserved." They are covered by the
-    Chromium BSD-style license reproduced below, quoted from the LICENSE file
-    of the quiche revision they were translated from.
+  * lib/ngtcp2_pcg.c embeds the PCG random number generator, taken from
+    imneme/pcg-c, and carries "Copyright 2014-2019 Melissa O'Neill
+    <oneill@pcg-random.org>, and the PCG Project contributors". It states
+    "SPDX-License-Identifier: (Apache-2.0 OR MIT)"; under the MIT option its
+    terms are the MIT terms reproduced above.
 
   * Several files under lib/ carry "Copyright (c) 2012-2023 nghttp2
     contributors". They are distributed under the same MIT terms as the ngtcp2
     COPYING text above.
 
-// Copyright 2015 The Chromium Authors. All rights reserved.
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//    * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//    * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//    * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
-picotls b84869f -- https://github.com/h2o/picotls
+picotls f07f1c8 -- https://github.com/h2o/picotls
 -------------------------------------------------
 
 picotls has no top-level license file; the terms are stated in the header of
