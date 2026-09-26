@@ -28,9 +28,51 @@ Linking the host's libcrypto rather than bundling one is deliberate: the process
 
 **LibreSSL** is supported and exercised: `ext/quic/patches/picotls/` carries a patch that restores picotls's X25519 key exchange there, which upstream disables because LibreSSL lacks `EVP_PKEY_{get1,set1}_tls_encodedpoint()`. The patch is a no-op on OpenSSL, where X25519 is available anyway.
 
+## Usage
+
+```ruby
+require "quic"
+require "socket"
+
+client = QUIC::Connection::Client.new(
+  host: "cloudflare-quic.com", port: 443, address_family: :inet,
+  settings: QUIC::Settings.default.with(alpn: ["h3"])
+)
+sock = UDPSocket.new(Socket::AF_INET)
+sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)
+client.bind(sock).run # completes the handshake, verifying the certificate
+client.handshake_completed? # => true
+```
+
+Pinning the address family and connecting the socket to `client.remote_address` keeps the socket and ngtcp2's connection path on the same peer address; resolving the host name twice could otherwise pick different DNS records.
+
+More complete programs live in [`examples/`](examples/):
+
+- [`handshake_demo.rb`](examples/handshake_demo.rb): prints the library versions and times a handshake.
+- [`echo_demo.rb`](examples/echo_demo.rb): exchanges data on a stream with a local echo server.
+- [`doq_demo.rb`](examples/doq_demo.rb): sends a DNS over QUIC query.
+- [`io_loop_demo.rb`](examples/io_loop_demo.rb): sends the same query from an I/O loop the script owns, calling `#write_pkt` / `#read_pkt` / `#handle_expiry` itself.
+- [`verify_demo.rb`](examples/verify_demo.rb): tries the certificate verification settings described below against a public server.
+
+### Certificate verification
+
+The server certificate is verified by default, against the system's trusted CAs.
+
+Setting `ca_file` (a PEM bundle) or `ca_path` (a hashed certificate directory) trusts only the certificates found there:
+
+```ruby
+settings = QUIC::Settings.default.with(alpn: ["h3"], ca_file: "/path/to/ca.pem")
+```
+
+`verify_mode: :none` turns verification off, for example against a local test server with a self-signed certificate:
+
+```ruby
+settings = QUIC::Settings.default.with(alpn: ["perf"], verify_mode: :none)
+```
+
 ## Limitations
 
-- **Server certificates are not verified.** Neither the certificate chain nor the CertificateVerify signature against the leaf public key is checked, so there is no protection against an active attacker. Verification is planned but not implemented.
+- **No certificate revocation checking.** CRLs and OCSP are not consulted.
 - **No session resumption or 0-RTT.**
 - **No server side.** Only the client (`QUIC::Connection::Client`) exists; there is no listen/accept.
 - **Key exchanges and cipher suites are fixed.** X25519, secp256r1 and secp384r1 with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305. They cannot be selected from Ruby.

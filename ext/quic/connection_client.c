@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
+#include <openssl/err.h>
 #include <openssl/rand.h>
 
 /* Buffer size for #write_pkt. NGTCP2_MAX_UDP_PAYLOAD_SIZE (1200) is the
@@ -33,11 +34,38 @@ static ptls_cipher_suite_t *quic_cipher_suites[] = {
   NULL,
 };
 
+/* The system default store is loaded once per process: reading the CA bundle
+   takes several milliseconds. X509_STORE is reference counted and safe to
+   share across verifications; creation runs under the GVL. Never freed. */
+static X509_STORE *quic_default_store;
+
+static X509_STORE *
+quic_get_default_store(void)
+{
+  if (quic_default_store == NULL) {
+    X509_STORE *store = X509_STORE_new();
+    if (store == NULL || X509_STORE_set_default_paths(store) != 1) {
+      X509_STORE_free(store);
+      rb_raise(rb_eRuntimeError, "failed to load the default certificate store");
+    }
+    quic_default_store = store;
+  }
+  return quic_default_store;
+}
+
 typedef struct {
   ngtcp2_conn *conn;
   /* Referenced by cptls.ptls, which only keeps the pointer, so this has to
      outlive the ptls_t. */
   ptls_context_t tls_ctx;
+  /* Referenced by tls_ctx.verify_certificate when verify_mode is :peer. Holds
+     a reference to an X509_STORE, released in quic_client_free. */
+  ptls_openssl_verify_certificate_t verify_cert;
+  bool verify_cert_initialized;
+  /* Filled by quic_override_verify_cb during the handshake so that a failed
+     read_pkt can raise CertificateVerifyFailed with the X509 error. */
+  bool verify_failed;
+  int verify_result;  /* X509_V_ERR_*, 0 when the server sent no certificate */
   /* The TLS native handle handed to ngtcp2 (&cptls, not cptls.ptls). */
   ngtcp2_crypto_picotls_ctx cptls;
   /* [0]: QUIC transport params, filled in by ngtcp2; [1]: terminator. */
@@ -74,6 +102,8 @@ quic_client_free(void *ptr)
     ngtcp2_crypto_picotls_deconfigure_session(&c->cptls);
     ptls_free(c->cptls.ptls);
   }
+  /* After ptls_free: the ptls_t references verify_cert through tls_ctx. */
+  if (c->verify_cert_initialized) ptls_openssl_dispose_verify_certificate(&c->verify_cert);
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);
@@ -364,6 +394,117 @@ quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
   return 0;
 }
 
+/* Record the X509 verification result so read_pkt can raise a descriptive
+   error. The verdict itself is left to picotls: ret is returned unchanged.
+   Runs synchronously inside read_pkt with the GVL held; it only writes to the
+   struct and never touches Ruby objects. */
+static int
+quic_override_verify_cb(ptls_openssl_override_verify_certificate_t *self,
+                        ptls_t *tls, int ret, int ossl_ret, X509 *cert,
+                        STACK_OF(X509) *chain)
+{
+  (void)self;
+  (void)cert;
+  (void)chain;
+  ngtcp2_crypto_conn_ref *ref = *ptls_get_data_ptr(tls);
+  quic_client_t *c = (quic_client_t *)ref->user_data;
+  if (ret != 0) {
+    c->verify_failed = true;
+    c->verify_result = ossl_ret;
+  }
+  return ret;
+}
+
+static ptls_openssl_override_verify_certificate_t quic_override_verify = {
+  quic_override_verify_cb,
+};
+
+/* Validate a ca_file / ca_path setting and return it as a String, or Qnil.
+   Accepts a String or anything responding to #to_path. Every misconfiguration
+   of the verification settings raises ArgumentError, including a wrong type. */
+static VALUE
+quic_verify_path_value(VALUE value, const char *name)
+{
+  if (NIL_P(value)) return Qnil;
+
+  VALUE path = value;
+  if (!RB_TYPE_P(path, T_STRING)) {
+    if (rb_respond_to(path, rb_intern("to_path"))) {
+      path = rb_funcall(path, rb_intern("to_path"), 0);
+    }
+    if (!RB_TYPE_P(path, T_STRING)) {
+      rb_raise(rb_eArgError, "%s must be a String or Pathname (got %"PRIsVALUE")",
+               name, rb_obj_class(value));
+    }
+  }
+  /* Raises ArgumentError when the path contains a NUL byte. */
+  StringValueCStr(path);
+  return path;
+}
+
+/* Install picotls's certificate verifier on c->tls_ctx according to the
+   verify_mode / ca_file / ca_path settings. Leaves verify_certificate NULL
+   for verify_mode :none, which skips verification altogether. */
+static void
+quic_client_setup_verify(quic_client_t *c, VALUE settings_v, VALUE server_name)
+{
+  VALUE mode = rb_funcall(settings_v, rb_intern("verify_mode"), 0);
+  /* ca_file and ca_path are not even type-checked under :none. */
+  if (mode == ID2SYM(rb_intern("none"))) return;
+  if (mode != ID2SYM(rb_intern("peer"))) {
+    rb_raise(rb_eArgError, "verify_mode must be :peer or :none (got %+"PRIsVALUE")", mode);
+  }
+
+  VALUE ca_file = quic_verify_path_value(rb_funcall(settings_v, rb_intern("ca_file"), 0), "ca_file");
+  VALUE ca_path = quic_verify_path_value(rb_funcall(settings_v, rb_intern("ca_path"), 0), "ca_path");
+
+  /* An empty name makes OpenSSL clear its host list and skip the name check,
+     and both SNI and the check would silently stop at an embedded NUL. */
+  if (RSTRING_LEN(server_name) == 0 ||
+      memchr(RSTRING_PTR(server_name), '\0', (size_t)RSTRING_LEN(server_name)) != NULL) {
+    rb_raise(rb_eArgError,
+             "server_name must be a non-empty string without NUL bytes when verify_mode is :peer");
+  }
+  /* X509_LOOKUP_hash_dir does not check that the directory exists. */
+  if (!NIL_P(ca_path) && !RTEST(rb_funcall(rb_cFile, rb_intern("directory?"), 1, ca_path))) {
+    rb_raise(rb_eArgError, "ca_path is not a directory: %"PRIsVALUE, ca_path);
+  }
+
+  X509_STORE *store;
+  bool own_store = !NIL_P(ca_file) || !NIL_P(ca_path);
+  if (own_store) {
+    /* Trust only what was given; the system store is not consulted. */
+    store = X509_STORE_new();
+    if (store == NULL) {
+      rb_raise(rb_eRuntimeError, "X509_STORE_new failed");
+    }
+    if (X509_STORE_load_locations(store,
+                                  NIL_P(ca_file) ? NULL : RSTRING_PTR(ca_file),
+                                  NIL_P(ca_path) ? NULL : RSTRING_PTR(ca_path)) != 1) {
+      X509_STORE_free(store);
+      /* libcrypto is shared with Ruby's openssl extension; do not leave our
+         failure on its error queue. */
+      ERR_clear_error();
+      if (NIL_P(ca_file)) {
+        rb_raise(rb_eArgError, "failed to load ca_path: %"PRIsVALUE, ca_path);
+      }
+      rb_raise(rb_eArgError, "failed to load ca_file: %"PRIsVALUE, ca_file);
+    }
+  } else {
+    store = quic_get_default_store();
+  }
+
+  /* init takes its own reference on the store, so ours can go right away. */
+  int rv = ptls_openssl_init_verify_certificate(&c->verify_cert, store);
+  if (own_store) X509_STORE_free(store);
+  if (rv != 0) {
+    rb_raise(rb_eRuntimeError, "ptls_openssl_init_verify_certificate failed");
+  }
+  c->verify_cert_initialized = true;
+  c->verify_cert.override_callback = &quic_override_verify;
+  c->tls_ctx.verify_certificate = &c->verify_cert.super;
+}
+
 static VALUE
 quic_client_open(int argc, VALUE *argv, VALUE klass)
 {
@@ -443,6 +584,10 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
   if (ngtcp2_crypto_picotls_configure_client_context(&c->tls_ctx) != 0) {
     rb_raise(rb_eRuntimeError, "ngtcp2_crypto_picotls_configure_client_context failed");
   }
+
+  /* ptls_client_new keeps a pointer to tls_ctx, so the verifier has to be in
+     place before it runs. */
+  quic_client_setup_verify(c, settings_v, server_name);
 
   c->conn_ref.get_conn = quic_client_get_conn;
   c->conn_ref.user_data = c;
@@ -688,6 +833,36 @@ quic_client_write_pkt(int argc, VALUE *argv, VALUE self)
   return buffer;
 }
 
+NORETURN(static void quic_client_raise_error(quic_client_t *c, int rv));
+
+/* Like quic_raise_ngtcp2_error, but for errors from read_pkt, where the TLS
+   handshake runs: NGTCP2_ERR_CRYPTO carries the TLS alert this client sent,
+   and becomes CertificateVerifyFailed when the verifier rejected the peer. */
+static void
+quic_client_raise_error(quic_client_t *c, int rv)
+{
+  if (rv != NGTCP2_ERR_CRYPTO) quic_raise_ngtcp2_error(rv);
+
+  /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
+     verification failure, so report it as nil. */
+  uint8_t alert = ngtcp2_conn_get_tls_alert(c->conn);
+  VALUE exc;
+  if (c->verify_failed) {
+    VALUE msg = c->verify_result
+      ? rb_sprintf("certificate verify failed (%s)",
+                   X509_verify_cert_error_string(c->verify_result))
+      : rb_str_new_cstr("certificate verify failed (server sent no certificate)");
+    exc = rb_exc_new_str(rb_eQUICErrorCertificateVerifyFailed, msg);
+    rb_ivar_set(exc, rb_intern("@verify_result"),
+                c->verify_result ? INT2NUM(c->verify_result) : Qnil);
+  } else {
+    exc = rb_exc_new_cstr(rb_eQUICErrorCryptoError, ngtcp2_strerror(rv));
+  }
+  rb_ivar_set(exc, rb_intern("@code"), INT2NUM(rv));
+  rb_ivar_set(exc, rb_intern("@tls_alert"), alert ? INT2NUM(alert) : Qnil);
+  rb_exc_raise(exc);
+}
+
 struct quic_read_pkt_args {
   quic_client_t *c;
   VALUE packet;
@@ -705,7 +880,7 @@ quic_read_pkt_body(VALUE arg)
                                 quic_now());
   if (rv != 0) {
     /* NORETURN: longjmp passes through rb_ensure so unlock still fires. */
-    quic_raise_ngtcp2_error(rv);
+    quic_client_raise_error(a->c, rv);
   }
   return Qnil;
 }

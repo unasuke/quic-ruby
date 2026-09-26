@@ -3,6 +3,8 @@
 require "test_helper"
 
 class TestQUIC < Minitest::Test
+  include TestCertificates
+
   def test_that_it_has_a_version_number
     refute_nil ::QUIC::VERSION
   end
@@ -134,6 +136,25 @@ class TestQUIC < Minitest::Test
     assert_equal ["h3"], settings.alpn
   end
 
+  def test_settings_default_verifies_peer
+    settings = QUIC::Settings.default
+    assert_equal :peer, settings.verify_mode
+    assert_nil settings.ca_file
+    assert_nil settings.ca_path
+  end
+
+  # Code written before the verification fields existed builds Settings
+  # without them; it still gets the verifying defaults.
+  def test_settings_new_without_verify_fields_uses_defaults
+    settings = QUIC::Settings.new(
+      cc_algo: :cubic, initial_rtt: 333_000_000, max_window: 0, max_stream_window: 0,
+      handshake_timeout: 10_000_000_000, no_pmtud: false, alpn: []
+    )
+    assert_equal :peer, settings.verify_mode
+    assert_nil settings.ca_file
+    assert_nil settings.ca_path
+  end
+
   def test_handshake_completed_is_false_initially
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
     assert_equal false, client.handshake_completed?
@@ -165,6 +186,99 @@ class TestQUIC < Minitest::Test
     settings = QUIC::Settings.default.with(alpn: ["h3"])
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443, settings: settings)
     assert_instance_of QUIC::Connection::Client, client
+  end
+
+  # Open a client through _open so server_name can differ from the address.
+  # Nothing is sent, so no server is needed.
+  def open_client(settings: QUIC::Settings.default, server_name: "example.com")
+    QUIC::Connection::Client._open(
+      local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
+      remote_sockaddr: Addrinfo.udp("127.0.0.1", 443).to_sockaddr,
+      server_name: server_name,
+      transport_params: QUIC::TransportParams.default,
+      settings: settings
+    )
+  end
+
+  # Long header, fixed bit set, Initial packet type (0b1100_xxxx).
+  def assert_initial_packet(client)
+    pkt = client.write_pkt
+    refute_nil pkt
+    assert_equal 0xc0, pkt.getbyte(0) & 0xf0
+  end
+
+  def test_open_with_default_store_produces_initial
+    assert_initial_packet(open_client)
+  end
+
+  def test_open_with_ca_file_produces_initial
+    Dir.mktmpdir do |dir|
+      assert_initial_packet(open_client(settings: QUIC::Settings.default.with(ca_file: write_ca_file(dir))))
+    end
+  end
+
+  def test_open_raises_on_missing_ca_file
+    settings = QUIC::Settings.default.with(ca_file: "/nonexistent/quic-ruby-ca.pem")
+    error = assert_raises(ArgumentError) { open_client(settings: settings) }
+    assert_match(/failed to load ca_file/, error.message)
+  end
+
+  def test_open_raises_on_ca_file_without_certificates
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "empty.pem")
+      File.write(path, "")
+      error = assert_raises(ArgumentError) { open_client(settings: QUIC::Settings.default.with(ca_file: path)) }
+      assert_match(/failed to load ca_file/, error.message)
+    end
+  end
+
+  def test_open_raises_on_ca_path_not_directory
+    Dir.mktmpdir do |dir|
+      settings = QUIC::Settings.default.with(ca_path: write_ca_file(dir))
+      error = assert_raises(ArgumentError) { open_client(settings: settings) }
+      assert_match(/ca_path is not a directory/, error.message)
+    end
+  end
+
+  # Every misconfiguration of the verification settings is an ArgumentError,
+  # a wrong type included.
+  def test_open_raises_on_non_path_ca_file
+    error = assert_raises(ArgumentError) { open_client(settings: QUIC::Settings.default.with(ca_file: 1)) }
+    assert_match(/ca_file must be a String or Pathname/, error.message)
+  end
+
+  def test_open_ignores_ca_file_with_verify_mode_none
+    settings = QUIC::Settings.default.with(verify_mode: :none)
+    assert_initial_packet(open_client(settings: settings.with(ca_file: "/nonexistent/quic-ruby-ca.pem")))
+    assert_initial_packet(open_client(settings: settings.with(ca_file: 1)))
+  end
+
+  # An empty name would make OpenSSL skip the host name check entirely.
+  def test_open_raises_on_empty_server_name_when_verifying
+    error = assert_raises(ArgumentError) { open_client(server_name: "") }
+    assert_match(/server_name must be a non-empty string/, error.message)
+  end
+
+  def test_open_raises_on_nul_in_server_name_when_verifying
+    assert_raises(ArgumentError) { open_client(server_name: "example.com\0evil") }
+  end
+
+  def test_open_allows_empty_server_name_without_verification
+    client = open_client(settings: QUIC::Settings.default.with(verify_mode: :none), server_name: "")
+    assert_instance_of QUIC::Connection::Client, client
+  end
+
+  def test_open_raises_on_unknown_verify_mode
+    assert_raises(ArgumentError) { open_client(settings: QUIC::Settings.default.with(verify_mode: :optional)) }
+    assert_raises(ArgumentError) { open_client(settings: QUIC::Settings.default.with(verify_mode: "peer")) }
+  end
+
+  def test_certificate_verify_failed_is_a_crypto_error
+    assert_operator QUIC::Error::CertificateVerifyFailed, :<, QUIC::Error::CryptoError
+    error = QUIC::Error::CertificateVerifyFailed.new("certificate verify failed")
+    assert_nil error.tls_alert
+    assert_nil error.verify_result
+    assert_nil QUIC::Error::CryptoError.new("ERR_CRYPTO").tls_alert
   end
 
   # Build a bare QUIC::Stream for tests that exercise the in-Ruby state
@@ -391,6 +505,21 @@ class TestQUIC < Minitest::Test
     assert_equal 0xc0, pkt.getbyte(0) & 0xf0
     # ngtcp2 pads the client's first Initial to at least 1200 bytes.
     assert_operator pkt.bytesize, :>=, 1200
+  end
+
+  # The verifier and its X509_STORE reference live in the C struct, outside
+  # Ruby's heap. Build a client that owns a store loaded from ca_file (the
+  # file itself is gone by the time compaction runs), then make sure it is
+  # still usable after compaction.
+  def test_client_with_ca_file_survives_gc_compaction
+    client = Dir.mktmpdir do |dir|
+      open_client(settings: QUIC::Settings.default.with(ca_file: write_ca_file(dir)))
+    end
+
+    GC.start
+    GC.verify_compaction_references(expand_heap: true, toward: :empty)
+
+    assert_initial_packet(client)
   end
 
   # A bare Stream (@client == nil) escapes the ngtcp2 call and only flips

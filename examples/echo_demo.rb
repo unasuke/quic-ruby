@@ -10,6 +10,12 @@
 #   QUIC_ECHO_HOST  (default 127.0.0.1)
 #   QUIC_ECHO_PORT  (default 4433)
 #   QUIC_ECHO_ALPN  (default perf)
+#   QUIC_ECHO_CA_FILE (default unset: the server certificate is not verified)
+#
+# The echo server usually runs with a self-signed certificate, so
+# verification is off unless QUIC_ECHO_CA_FILE names a CA to trust. When it
+# is set, the certificate must match QUIC_ECHO_HOST, which means an IP SAN
+# of 127.0.0.1 with the default host.
 #
 # Run with: bundle exec ruby examples/echo_demo.rb
 
@@ -20,19 +26,23 @@ require "socket"
 TARGET_HOST = ENV.fetch("QUIC_ECHO_HOST", "127.0.0.1")
 TARGET_PORT = Integer(ENV.fetch("QUIC_ECHO_PORT", "4433"))
 TARGET_ALPN = ENV.fetch("QUIC_ECHO_ALPN", "perf")
-
-addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
-sock = UDPSocket.new
-sock.connect(addr.ip_address, addr.ip_port)
+TARGET_CA_FILE = ENV["QUIC_ECHO_CA_FILE"]
 
 settings = QUIC::Settings.default.with(alpn: [TARGET_ALPN])
-client = QUIC::Connection::Client._open(
-  local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
-  remote_sockaddr: addr.to_sockaddr,
-  server_name: TARGET_HOST,
-  transport_params: QUIC::TransportParams.default,
-  settings: settings
+settings = if TARGET_CA_FILE.nil? || TARGET_CA_FILE.empty?
+  settings.with(verify_mode: :none)
+else
+  settings.with(ca_file: TARGET_CA_FILE)
+end
+
+# Connect the socket to the address the client resolved, so both talk to the
+# same peer (see examples/handshake_demo.rb).
+client = QUIC::Connection::Client.new(
+  host: TARGET_HOST, port: TARGET_PORT, address_family: :inet, settings: settings
 )
+addr = client.remote_address
+sock = UDPSocket.new(Socket::AF_INET)
+sock.connect(addr.ip_address, addr.ip_port)
 client.bind(sock).run
 
 stream = client.open_bidi_stream
@@ -46,4 +56,5 @@ response = stream.read
 puts "received #{response.bytesize} bytes:"
 puts response
 
+client.close
 sock.close

@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
 # Sample script: drive a real QUIC + TLS 1.3 handshake against a public
-# HTTP/3 server (cloudflare-quic.com:443) using Client#bind + Client#run.
+# HTTP/3 server (cloudflare-quic.com:443) using Client#bind + Client#run, and
+# print the library versions the extension was built with.
 #
-# Why _open instead of Client.new: Client.new resolves the hostname via
-# Addrinfo.udp, and UDPSocket#connect resolves it independently. Cloudflare
-# returns multiple A/AAAA records, so the two resolutions can disagree
-# and ngtcp2 then drops every reply with "ignore packet from unknown path".
-# Pre-resolving once to a single IPv4 sockaddr and feeding it to both
-# _open and the socket avoids this.
+# address_family: :inet pins the lookup to a single IPv4 address, and the
+# socket is connected to client.remote_address so that it talks to the same
+# peer as the connection path ngtcp2 holds. Cloudflare returns several A/AAAA
+# records; a second, independent lookup could pick another one, and ngtcp2
+# would then drop every reply as coming from an unknown path.
 #
 # Run with: bundle exec ruby examples/handshake_demo.rb
 
@@ -19,18 +19,13 @@ require "socket"
 TARGET_HOST = "cloudflare-quic.com"
 TARGET_PORT = 443
 
-addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
-sock = UDPSocket.new
-sock.connect(addr.ip_address, addr.ip_port)
-
-settings = QUIC::Settings.default.with(alpn: ["h3"])
-client = QUIC::Connection::Client._open(
-  local_sockaddr: Addrinfo.udp("0.0.0.0", 0).to_sockaddr,
-  remote_sockaddr: addr.to_sockaddr,
-  server_name: TARGET_HOST,
-  transport_params: QUIC::TransportParams.default,
-  settings: settings
+client = QUIC::Connection::Client.new(
+  host: TARGET_HOST, port: TARGET_PORT, address_family: :inet,
+  settings: QUIC::Settings.default.with(alpn: ["h3"])
 )
+addr = client.remote_address
+sock = UDPSocket.new(Socket::AF_INET)
+sock.connect(addr.ip_address, addr.ip_port)
 
 puts "ngtcp2: #{QUIC.library_versions[:ngtcp2]}"
 puts "picotls: #{QUIC.library_versions[:picotls]}"
@@ -43,4 +38,6 @@ client.bind(sock).run
 elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round(1)
 
 puts "handshake_completed? #{client.handshake_completed?} (#{elapsed_ms}ms)"
+
+client.close
 sock.close

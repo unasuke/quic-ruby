@@ -11,6 +11,7 @@ VALUE rb_eQUICErrorDropConn;
 VALUE rb_eQUICErrorRetry;
 VALUE rb_eQUICErrorClosed;
 VALUE rb_eQUICErrorCryptoError;
+VALUE rb_eQUICErrorCertificateVerifyFailed;
 VALUE rb_eQUICErrorHandshakeTimeout;
 VALUE rb_eQUICErrorFlowControl;
 VALUE rb_eQUICErrorUnknown;
@@ -95,6 +96,13 @@ Init_quic(void)
   rb_eQUICErrorRetry = rb_define_class_under(rb_eQUICError, "Retry", rb_eQUICError);
   rb_eQUICErrorClosed = rb_define_class_under(rb_eQUICError, "Closed", rb_eQUICError);
   rb_eQUICErrorCryptoError = rb_define_class_under(rb_eQUICError, "CryptoError", rb_eQUICError);
+  /* The TLS alert this client sent, when read_pkt fails in the handshake.
+     Alerts received from the peer are not recorded by ngtcp2. */
+  rb_define_attr(rb_eQUICErrorCryptoError, "tls_alert", 1, 0);
+  rb_eQUICErrorCertificateVerifyFailed =
+    rb_define_class_under(rb_eQUICError, "CertificateVerifyFailed", rb_eQUICErrorCryptoError);
+  /* X509_V_ERR_* from the chain / name check, or nil when no certificate came. */
+  rb_define_attr(rb_eQUICErrorCertificateVerifyFailed, "verify_result", 1, 0);
   rb_eQUICErrorHandshakeTimeout = rb_define_class_under(rb_eQUICError, "HandshakeTimeout", rb_eQUICError);
   rb_eQUICErrorFlowControl = rb_define_class_under(rb_eQUICError, "FlowControl", rb_eQUICError);
   rb_eQUICErrorUnknown = rb_define_class_under(rb_eQUICError, "Unknown", rb_eQUICError);

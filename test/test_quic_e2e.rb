@@ -4,6 +4,8 @@ require "test_helper"
 require "socket"
 
 class TestQUICE2E < Minitest::Test
+  include TestCertificates
+
   TARGET_HOST = "cloudflare-quic.com"
   TARGET_PORT = 443
   TIMEOUT_SEC = 10
@@ -12,14 +14,44 @@ class TestQUICE2E < Minitest::Test
     skip "set EXTERNAL=1 to run E2E tests" unless ENV["EXTERNAL"] == "1"
   end
 
+  # Verification is on by default, so this also covers the system store
+  # accepting a real server's chain.
   def test_handshake_completes_against_public_server
-    # Resolve once to IPv4 and reuse the same Addrinfo for the socket and the
-    # connection path. cloudflare-quic.com has multiple A/AAAA records and the
-    # default Addrinfo.udp picks any of them, so a separate resolution inside
-    # QUIC::Connection::Client.new vs. UDPSocket#connect can return different
-    # IPs (or different address families) and ngtcp2 then rejects every reply
-    # with "ignore packet from unknown path". Calling _open directly with a
-    # pre-resolved sockaddr ensures both sides agree on the path.
+    client = handshake(settings: QUIC::Settings.default.with(alpn: ["h3"]))
+    assert_predicate client, :handshake_completed?
+  end
+
+  def test_handshake_completes_without_verification
+    client = handshake(settings: QUIC::Settings.default.with(alpn: ["h3"], verify_mode: :none))
+    assert_predicate client, :handshake_completed?
+  end
+
+  # cloudflare-quic.com does not send its root certificate, so a store that
+  # holds only an unrelated CA cannot find the issuer locally. picotls reports
+  # that with the unknown_ca alert.
+  def test_handshake_fails_with_untrusted_ca
+    Dir.mktmpdir do |dir|
+      settings = QUIC::Settings.default.with(alpn: ["h3"], ca_file: write_ca_file(dir))
+      error = assert_raises(QUIC::Error::CertificateVerifyFailed) { handshake(settings: settings) }
+      assert_equal "certificate verify failed (unable to get local issuer certificate)", error.message
+      assert_equal 48, error.tls_alert
+      assert_equal OpenSSL::X509::V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY, error.verify_result
+    end
+  end
+
+  private
+
+  # Drive a handshake with cloudflare-quic.com and return the client once it
+  # completes. QUIC::Error raised by the connection propagates.
+  #
+  # Resolve once to IPv4 and reuse the same Addrinfo for the socket and the
+  # connection path. cloudflare-quic.com has multiple A/AAAA records and the
+  # default Addrinfo.udp picks any of them, so a separate resolution inside
+  # QUIC::Connection::Client.new vs. UDPSocket#connect can return different
+  # IPs (or different address families) and ngtcp2 then rejects every reply
+  # with "ignore packet from unknown path". Calling _open directly with a
+  # pre-resolved sockaddr ensures both sides agree on the path.
+  def handshake(settings:, server_name: TARGET_HOST)
     addr = Addrinfo.getaddrinfo(TARGET_HOST, TARGET_PORT, Socket::AF_INET, Socket::SOCK_DGRAM).first
     remote_sockaddr = addr.to_sockaddr
     local_sockaddr = Addrinfo.udp("0.0.0.0", 0).to_sockaddr
@@ -27,11 +59,10 @@ class TestQUICE2E < Minitest::Test
     sock = UDPSocket.new
     sock.connect(addr.ip_address, addr.ip_port)
 
-    settings = QUIC::Settings.default.with(alpn: ["h3"])
     client = QUIC::Connection::Client._open(
       local_sockaddr: local_sockaddr,
       remote_sockaddr: remote_sockaddr,
-      server_name: TARGET_HOST,
+      server_name: server_name,
       transport_params: QUIC::TransportParams.default,
       settings: settings
     )
@@ -63,7 +94,7 @@ class TestQUICE2E < Minitest::Test
       end
     end
 
-    assert_predicate client, :handshake_completed?
+    client
   ensure
     sock&.close
   end
