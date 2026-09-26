@@ -159,5 +159,6 @@ abort "libcrypto not linkable" unless have_func("OpenSSL_version", "openssl/cryp
 # reports the commit the extension was built against.
 append_cflags("-DQUIC_PICOTLS_COMMIT=\\\"#{PICOTLS_COMMIT}\\\"")
 append_cflags("-fvisibility=hidden")
+append_ldflags("-Wl,--exclude-libs,ALL")  # Unexport symbols from statically linked libraries
 
 create_makefile("quic/quic")
