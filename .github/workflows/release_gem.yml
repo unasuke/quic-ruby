@@ -25,43 +25,22 @@ jobs:
         with:
           ruby-version: ruby
 
-      # Deliberately without bundler-cache, which installs into ./vendor/bundle and
-      # writes BUNDLE_PATH into .bundle/config. rake-compiler-dock mounts the working
-      # dir into a container with an older glibc, and a local .bundle/config outranks
-      # the BUNDLE_PATH environment variable, so the container's bundler would load
-      # the host-built native gems from vendor/bundle and die with "GLIBC_x.yz not
-      # found". BUNDLE_FROZEN keeps this install from rewriting Gemfile.lock, which
-      # would trip release:guard_clean further down.
+      # Deliberately without bundler-cache, which installs into ./vendor/bundle.
+      # vendor/ is not gitignored, so the untracked tree would trip
+      # release:guard_clean further down; BUNDLE_FROZEN keeps this install from
+      # rewriting Gemfile.lock, which would trip it too.
       - name: Install host gems
         run: BUNDLE_FROZEN=true bundle install
 
-      # Build the precompiled x86_64-linux-gnu gem first, so a broken build stops
-      # the job before release-gem creates the tag. pkg/ is gitignored, so it does
-      # not disturb release:guard_clean inside the rake release run below.
-      - name: Build precompiled x86_64-linux-gnu gem
-        run: bundle exec rake gem:x86_64-linux-gnu
-
-      # release-gem awaits every pkg/*.gem, so the not-yet-pushed precompiled gem
-      # has to be moved out of pkg/ first. RUNNER_TEMP is outside the repository,
-      # so it stays invisible to release:guard_clean.
-      - name: Move precompiled gem out of pkg/
-        run: |
-          mkdir -p "${RUNNER_TEMP}/precompiled"
-          mv pkg/quic-*-x86_64-linux-gnu.gem "${RUNNER_TEMP}/precompiled/"
-
       # Makes the build: :compile dependency of rake release a no-op. Trusted
-      # publishing API keys expire 15 minutes after they are issued, so the full
-      # LibreSSL/ngtcp2 build must not run inside release-gem.
+      # publishing API keys expire 15 minutes after they are issued, so the
+      # ngtcp2 and picotls build must not run inside release-gem.
       - name: Compile extension on host
         run: bundle exec rake compile
 
-      # Tags from lib/quic/version.rb, pushes the source (ruby platform) gem.
+      # Tags from lib/quic/version.rb, pushes the gem. The gem is source only;
+      # there is no precompiled platform gem to build or push alongside it.
       - uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
-
-      # rubygems/configure-rubygems-credentials has no post step, so the trusted
-      # publishing credentials configured by release-gem last until the job ends.
-      - name: Push precompiled x86_64-linux-gnu gem
-        run: gem push "${RUNNER_TEMP}"/precompiled/quic-*-x86_64-linux-gnu.gem
 
       - name: Create GitHub release
         run: |
