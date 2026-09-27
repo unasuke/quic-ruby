@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.0.2] - 2026-09-27
 
 ### Added
 - Server certificates are now verified, by default against the system's trusted CAs. `QUIC::Settings` gains `verify_mode` (`:peer`, the default, or `:none`), `ca_file` and `ca_path`; setting either of the latter trusts only the certificates found there. The system store is loaded once per process, so `SSL_CERT_FILE` / `SSL_CERT_DIR` are honoured but later changes to them are not picked up. A rejected certificate raises `QUIC::Error::CertificateVerifyFailed`, which carries the X509 error as `#verify_result`. ([#3](https://github.com/unasuke/quic-ruby/pull/3))
@@ -16,6 +16,7 @@
 - ngtcp2 is now built from 1.25.0 (was 1.22.1), and picotls from `f07f1c8`, the revision ngtcp2 1.25.0 is tested against. ngtcp2 now requires a C11 compiler to build. ([#4](https://github.com/unasuke/quic-ruby/pull/4))
 - quic.so exports only `Init_quic`. The symbols of the statically linked ngtcp2 and picotls are no longer visible to the rest of the process. ([#2](https://github.com/unasuke/quic-ruby/pull/2), by [@hanazuki](https://github.com/hanazuki))
 - `QUIC::Connection::Client` is now GC.compact safe: the C-side struct's back-reference to the owning Ruby object is updated via a `dcompact` slot.
+- The entries in this section were rewritten to state the difference from 0.0.1, rather than the succession of steps that got there. ([#5](https://github.com/unasuke/quic-ruby/pull/5))
 
 ### Fixed
 - `QUIC::Stream#read` hung until the idle timeout instead of returning. Both branches of the blocking read waited on a predicate that could never become true once the peer had sent anything, so the read spun in the I/O loop until ngtcp2 gave up. A read that can be satisfied from the receive buffer now performs no I/O at all.
