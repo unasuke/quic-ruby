@@ -33,3 +33,18 @@ module TestCertificates
     File.join(dir, "ca.pem").tap { |path| File.write(path, self_signed_ca_pem) }
   end
 end
+
+module TestStreams
+  # Build a bare QUIC::Stream for tests that exercise the in-Ruby state
+  # machine (initiator lookup, recv_buffer mutation, pending_chunks queue)
+  # without needing a completed handshake. The C-side quic_stream_t is
+  # zero-initialized by the alloc func; we only have to wire the Ruby ivars.
+  def build_stream(id:, client: nil)
+    QUIC::Stream.allocate.tap do |s|
+      s.instance_variable_set(:@id, id)
+      s.instance_variable_set(:@client, client)
+      s.instance_variable_set(:@pending_chunks, [])
+      s.instance_variable_set(:@recv_buffer, String.new(encoding: Encoding::BINARY))
+    end
+  end
+end
