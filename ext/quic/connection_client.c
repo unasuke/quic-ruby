@@ -845,7 +845,7 @@ quic_client_raise_error(quic_client_t *c, int rv)
 
   /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
      verification failure, so report it as nil. */
-  uint8_t alert = ngtcp2_conn_get_tls_alert(c->conn);
+  uint8_t alert = ngtcp2_conn_get_tls_alert2(c->conn);
   VALUE exc;
   if (c->verify_failed) {
     VALUE msg = c->verify_result
@@ -937,7 +937,7 @@ quic_client_handshake_completed_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_get_handshake_completed(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_get_handshake_completed2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -945,7 +945,7 @@ quic_client_in_closing_period_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_in_closing_period(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_in_closing_period2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -953,7 +953,7 @@ quic_client_in_draining_period_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_in_draining_period(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_in_draining_period2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -961,7 +961,7 @@ quic_client_expiry(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  ngtcp2_tstamp t = ngtcp2_conn_get_expiry(c->conn);
+  ngtcp2_tstamp t = ngtcp2_conn_get_expiry2(c->conn);
   if (t == UINT64_MAX) return Qnil;
   return ULL2NUM((unsigned long long)t);
 }
@@ -1044,8 +1044,8 @@ quic_client_close_m(int argc, VALUE *argv, VALUE self)
 
   /* Idempotent: a subsequent #close after the conn already entered the
      closing/draining period does not emit another CONNECTION_CLOSE. */
-  if (ngtcp2_conn_in_closing_period(c->conn) ||
-      ngtcp2_conn_in_draining_period(c->conn)) {
+  if (ngtcp2_conn_in_closing_period2(c->conn) ||
+      ngtcp2_conn_in_draining_period2(c->conn)) {
     return Qnil;
   }
 
