@@ -7,7 +7,7 @@ extern VALUE rb_cQUICStream;
 
 void Init_quic_stream(VALUE rb_mQUICArg);
 
-/* Internal helpers used by connection_client.c stream callbacks and
+/* Internal helpers used by connection_common.c stream callbacks and
    write_pkt's stream-aware path. */
 
 typedef struct {
@@ -29,17 +29,18 @@ typedef struct {
   bool closed;                /* stream_close callback fired */
   uint64_t close_app_error_code;
   bool close_has_app_error_code;
-  /* Set once a peer-initiated (server) stream has been pushed onto the
-     owner Client's @accept_queue, so recv_stream_data does not enqueue it
+  /* Set once a peer-initiated stream has been pushed onto the owning
+     connection's @accept_queue, so recv_stream_data does not enqueue it
      again on subsequent data arrivals. */
   bool accept_queued;
 } quic_stream_t;
 
 extern const rb_data_type_t quic_stream_data_type;
 
-/* Allocate a new QUIC::Stream Ruby object with a zero-initialized
-   quic_stream_t. Caller fills stream_id and ivars (@id / @client /
-   @pending_chunks / @recv_buffer). */
-VALUE quic_stream_new(int64_t stream_id, VALUE client);
+/* Allocate a new QUIC::Stream Ruby object for stream_id with a
+   zero-initialized quic_stream_t, and set its ivars (@id / @client /
+   @pending_chunks / @recv_buffer). @client is owner, the Client or Server
+   the stream belongs to; the ivar keeps its name for both. */
+VALUE quic_stream_new(int64_t stream_id, VALUE owner);
 
 #endif /* QUIC_STREAM_H */

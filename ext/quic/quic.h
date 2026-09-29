@@ -40,13 +40,6 @@ extern VALUE rb_eQUICErrorNotBound;
 
 void Init_quic_connection_client(VALUE rb_mQUICConnection);
 
-/* Accessor used by stream.c to issue ngtcp2 calls (e.g.
-   ngtcp2_conn_shutdown_stream_read) for streams that hold a back-reference
-   to their parent QUIC::Connection::Client via @client. Returns the raw
-   ngtcp2_conn pointer; the caller is responsible for ensuring the Ruby
-   Client object is alive for the duration of the call. */
-ngtcp2_conn *quic_client_conn(VALUE client);
-
 /* Raise a QUIC::Error subclass mapped from an ngtcp2 negative error code.
    Never returns. */
 NORETURN(void quic_raise_ngtcp2_error(int rv));

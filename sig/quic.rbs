@@ -86,7 +86,27 @@ module QUIC
   end
 
   module Connection
+    module Pump
+      def bind: (untyped sock) -> self
+      def bound_socket: () -> untyped
+      def run: () -> void
+      def pump_once: (?timeout: Float?) -> void
+      def pump_until: () { () -> boolish } -> void
+
+      # Pops the next peer-initiated (server) stream off the accept queue,
+      # driving the I/O loop until one arrives. timeout: nil blocks forever
+      # (requires #bind), timeout: 0 returns immediately, timeout: Numeric
+      # blocks up to that many seconds. Returns nil on timeout.
+      def accept_stream: (?timeout: Numeric?) -> Stream?
+
+      # Non-blocking #accept_stream. Returns the next queued server stream,
+      # or raises QUIC::Error::WaitReadable when the queue is empty.
+      def accept_stream_nonblock: () -> Stream
+    end
+
     class Client
+      include Pump
+
       attr_reader remote_address: Addrinfo
 
       def self.new: (host: String, port: Integer, ?address_family: Symbol?, ?transport_params: TransportParams?, ?settings: Settings?) -> Client
@@ -110,22 +130,6 @@ module QUIC
       def handshake_completed?: () -> bool
       def in_closing_period?: () -> bool
       def in_draining_period?: () -> bool
-
-      def bind: (untyped sock) -> Client
-      def bound_socket: () -> untyped
-      def run: () -> void
-      def pump_once: (?timeout: Float?) -> void
-      def pump_until: () { () -> boolish } -> void
-
-      # Pops the next peer-initiated (server) stream off the accept queue,
-      # driving the I/O loop until one arrives. timeout: nil blocks forever
-      # (requires #bind), timeout: 0 returns immediately, timeout: Numeric
-      # blocks up to that many seconds. Returns nil on timeout.
-      def accept_stream: (?timeout: Numeric?) -> Stream?
-
-      # Non-blocking #accept_stream. Returns the next queued server stream,
-      # or raises QUIC::Error::WaitReadable when the queue is empty.
-      def accept_stream_nonblock: () -> Stream
 
       # Sends an application CONNECTION_CLOSE (frame type 0x1d) to the peer
       # carrying error_code and reason, then transitions the underlying

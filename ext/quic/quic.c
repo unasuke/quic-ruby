@@ -96,7 +96,7 @@ Init_quic(void)
   rb_eQUICErrorRetry = rb_define_class_under(rb_eQUICError, "Retry", rb_eQUICError);
   rb_eQUICErrorClosed = rb_define_class_under(rb_eQUICError, "Closed", rb_eQUICError);
   rb_eQUICErrorCryptoError = rb_define_class_under(rb_eQUICError, "CryptoError", rb_eQUICError);
-  /* The TLS alert this client sent, when read_pkt fails in the handshake.
+  /* The TLS alert this endpoint sent, when read_pkt fails in the handshake.
      Alerts received from the peer are not recorded by ngtcp2. */
   rb_define_attr(rb_eQUICErrorCryptoError, "tls_alert", 1, 0);
   rb_eQUICErrorCertificateVerifyFailed =
