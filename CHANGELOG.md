@@ -1,3 +1,8 @@
+## [Unreleased]
+
+### Changed
+- The extension no longer uses the ngtcp2 functions and callbacks deprecated in 1.22.0 and 1.23.0, and calls their `*2` replacements instead. Behavior is unchanged. ([#8](https://github.com/unasuke/quic-ruby/pull/8))
+
 ## [0.0.2] - 2026-09-27
 
 ### Added
