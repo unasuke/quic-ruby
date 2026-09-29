@@ -167,7 +167,8 @@ quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
 
 static int
 quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
-                              uint8_t *token, size_t cidlen, void *user_data)
+                              ngtcp2_stateless_reset_token *token, size_t cidlen,
+                              void *user_data)
 {
   (void)conn;
   (void)user_data;
@@ -175,7 +176,7 @@ quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
   cid->datalen = cidlen;
-  if (RAND_bytes(token, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
+  if (RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
   return 0;
@@ -612,10 +613,10 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
   callbacks.update_key = ngtcp2_crypto_update_key_cb;
   callbacks.delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
   callbacks.delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
-  callbacks.get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb;
+  callbacks.get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb;
   callbacks.version_negotiation = ngtcp2_crypto_version_negotiation_cb;
   callbacks.rand = quic_rand_cb;
-  callbacks.get_new_connection_id = quic_get_new_connection_id_cb;
+  callbacks.get_new_connection_id2 = quic_get_new_connection_id_cb;
   callbacks.stream_open = quic_stream_open_cb;
   callbacks.recv_stream_data = quic_recv_stream_data_cb;
   callbacks.acked_stream_data_offset = quic_acked_stream_data_offset_cb;
@@ -845,7 +846,7 @@ quic_client_raise_error(quic_client_t *c, int rv)
 
   /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
      verification failure, so report it as nil. */
-  uint8_t alert = ngtcp2_conn_get_tls_alert(c->conn);
+  uint8_t alert = ngtcp2_conn_get_tls_alert2(c->conn);
   VALUE exc;
   if (c->verify_failed) {
     VALUE msg = c->verify_result
@@ -937,7 +938,7 @@ quic_client_handshake_completed_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_get_handshake_completed(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_get_handshake_completed2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -945,7 +946,7 @@ quic_client_in_closing_period_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_in_closing_period(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_in_closing_period2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -953,7 +954,7 @@ quic_client_in_draining_period_p(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  return ngtcp2_conn_in_draining_period(c->conn) ? Qtrue : Qfalse;
+  return ngtcp2_conn_in_draining_period2(c->conn) ? Qtrue : Qfalse;
 }
 
 static VALUE
@@ -961,7 +962,7 @@ quic_client_expiry(VALUE self)
 {
   quic_client_t *c;
   TypedData_Get_Struct(self, quic_client_t, &quic_client_data_type, c);
-  ngtcp2_tstamp t = ngtcp2_conn_get_expiry(c->conn);
+  ngtcp2_tstamp t = ngtcp2_conn_get_expiry2(c->conn);
   if (t == UINT64_MAX) return Qnil;
   return ULL2NUM((unsigned long long)t);
 }
@@ -1044,8 +1045,8 @@ quic_client_close_m(int argc, VALUE *argv, VALUE self)
 
   /* Idempotent: a subsequent #close after the conn already entered the
      closing/draining period does not emit another CONNECTION_CLOSE. */
-  if (ngtcp2_conn_in_closing_period(c->conn) ||
-      ngtcp2_conn_in_draining_period(c->conn)) {
+  if (ngtcp2_conn_in_closing_period2(c->conn) ||
+      ngtcp2_conn_in_draining_period2(c->conn)) {
     return Qnil;
   }
 

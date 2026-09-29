@@ -102,8 +102,8 @@ static uint64_t
 quic_stream_window_left(VALUE client_v, quic_stream_t *s)
 {
   ngtcp2_conn *conn = quic_client_conn(client_v);
-  uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left(conn, s->stream_id);
-  uint64_t conn_left = ngtcp2_conn_get_max_data_left(conn);
+  uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
+  uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
   return stream_left < conn_left ? stream_left : conn_left;
 }
 
