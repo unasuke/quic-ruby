@@ -21,6 +21,7 @@
 extern VALUE rb_mQUIC;
 extern VALUE rb_mQUICConnection;
 extern VALUE rb_cQUICConnectionClient;
+extern VALUE rb_cQUICConnectionServer;
 
 extern VALUE rb_eQUICError;
 extern VALUE rb_eQUICErrorProto;
@@ -39,6 +40,7 @@ extern VALUE rb_eQUICErrorStreamReset;
 extern VALUE rb_eQUICErrorNotBound;
 
 void Init_quic_connection_client(VALUE rb_mQUICConnection);
+void Init_quic_connection_server(VALUE rb_mQUICConnection);
 
 /* Raise a QUIC::Error subclass mapped from an ngtcp2 negative error code.
    Never returns. */

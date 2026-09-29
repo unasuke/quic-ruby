@@ -43,8 +43,15 @@ quic_conn_free(void *ptr)
     ngtcp2_crypto_picotls_deconfigure_session(&c->cptls);
     ptls_free(c->cptls.ptls);
   }
-  /* After ptls_free: the ptls_t references verify_cert through tls_ctx. */
+  /* After ptls_free: the ptls_t references verify_cert, sign_cert and the
+     certificate list through tls_ctx. */
   if (c->verify_cert_initialized) ptls_openssl_dispose_verify_certificate(&c->verify_cert);
+  if (c->sign_cert_initialized) ptls_openssl_dispose_sign_certificate(&c->sign_cert);
+  /* picotls malloc()ed the list and each entry, so free(), not xfree(). */
+  if (c->tls_ctx.certificates.list != NULL) {
+    for (size_t i = 0; i < c->tls_ctx.certificates.count; i++) free(c->tls_ctx.certificates.list[i].base);
+    free(c->tls_ctx.certificates.list);
+  }
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);

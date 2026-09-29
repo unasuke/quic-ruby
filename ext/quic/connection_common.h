@@ -24,6 +24,14 @@ typedef struct {
      read_pkt can raise CertificateVerifyFailed with the X509 error. */
   bool verify_failed;
   int verify_result;  /* X509_V_ERR_*, 0 when the server sent no certificate */
+  /* Server only. Referenced by tls_ctx.sign_certificate; holds a reference
+     to the private key, released in quic_conn_free. The certificate chain
+     itself lives in tls_ctx.certificates, also freed there. */
+  ptls_openssl_sign_certificate_t sign_cert;
+  bool sign_cert_initialized;
+  /* Server only. tls_ctx.on_client_hello points here; the callback recovers
+     this struct from its self argument with offsetof. */
+  ptls_on_client_hello_t on_client_hello;
   /* The TLS native handle handed to ngtcp2 (&cptls, not cptls.ptls). */
   ngtcp2_crypto_picotls_ctx cptls;
   /* [0]: QUIC transport params, filled in by ngtcp2; [1]: terminator. */

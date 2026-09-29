@@ -4,6 +4,7 @@
 VALUE rb_mQUIC;
 VALUE rb_mQUICConnection;
 VALUE rb_cQUICConnectionClient;
+VALUE rb_cQUICConnectionServer;
 
 VALUE rb_eQUICError;
 VALUE rb_eQUICErrorProto;
@@ -122,5 +123,6 @@ Init_quic(void)
   rb_eQUICErrorNotBound = rb_define_class_under(rb_eQUICError, "NotBound", rb_eQUICError);
 
   Init_quic_connection_client(rb_mQUICConnection);
+  Init_quic_connection_server(rb_mQUICConnection);
   Init_quic_stream(rb_mQUIC);
 }

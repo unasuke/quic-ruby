@@ -170,5 +170,16 @@ module QUIC
         client
       end
     end
+
+    # One server-side connection. Built by Server._accept from the first
+    # datagram a client sent; there is no public Server.new, since an object
+    # without an ngtcp2 connection behind it would be unusable.
+    class Server
+      include Pump
+
+      attr_reader :remote_address
+
+      private_class_method :new
+    end
   end
 end

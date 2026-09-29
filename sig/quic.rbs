@@ -78,6 +78,9 @@ module QUIC
     attr_reader handshake_timeout: Integer
     attr_reader no_pmtud: bool
     attr_reader alpn: Array[String]
+
+    # Client only: a server does not ask for a client certificate and
+    # ignores these three.
     attr_reader verify_mode: :peer | :none
     attr_reader ca_file: (String | _ToPath)?
     attr_reader ca_path: (String | _ToPath)?
@@ -134,6 +137,48 @@ module QUIC
       # Sends an application CONNECTION_CLOSE (frame type 0x1d) to the peer
       # carrying error_code and reason, then transitions the underlying
       # ngtcp2_conn to the closing period. Requires Client#bind to have been
+      # called; raises QUIC::Error::NotBound otherwise. A second #close call
+      # after the connection has already entered the closing or draining
+      # period is a no-op.
+      def close: (?error_code: Integer, ?reason: String) -> nil
+    end
+
+    class Server
+      include Pump
+
+      attr_reader remote_address: Addrinfo
+
+      # Builds a server connection from initial_packet, the first datagram a
+      # client sent; feed that datagram to #read_pkt afterwards. The
+      # certificate file is PEM, the leaf certificate first and then any
+      # intermediates. settings.alpn must not be empty (ArgumentError).
+      # A first packet that cannot start a connection raises
+      # QUIC::Error::Proto.
+      def self._accept: (
+        initial_packet: String,
+        local_sockaddr: String,
+        remote_sockaddr: String,
+        certificate_path: String | _ToPath,
+        private_key_path: String | _ToPath,
+        transport_params: TransportParams,
+        settings: Settings
+      ) -> Server
+
+      def open_bidi_stream: () -> Stream
+      def open_uni_stream: () -> Stream
+
+      def write_pkt: (?String? buffer) -> String?
+      def read_pkt: (String packet, local_sockaddr: String, remote_sockaddr: String) -> nil
+
+      def expiry: () -> Integer?
+      def handle_expiry: () -> nil
+      def handshake_completed?: () -> bool
+      def in_closing_period?: () -> bool
+      def in_draining_period?: () -> bool
+
+      # Sends an application CONNECTION_CLOSE (frame type 0x1d) to the peer
+      # carrying error_code and reason, then transitions the underlying
+      # ngtcp2_conn to the closing period. Requires #bind to have been
       # called; raises QUIC::Error::NotBound otherwise. A second #close call
       # after the connection has already entered the closing or draining
       # period is a no-op.
