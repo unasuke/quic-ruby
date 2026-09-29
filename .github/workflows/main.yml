@@ -31,6 +31,6 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tmp
-          key: ports-${{ runner.os }}-ngtcp2-1.22.1-picotls-b84869f-${{ hashFiles('ext/quic/extconf.rb', 'ext/quic/patches/**') }}
+          key: ports-${{ runner.os }}-ngtcp2-1.25.0-picotls-f07f1c8-${{ hashFiles('ext/quic/extconf.rb', 'ext/quic/patches/**') }}
       - name: Run the default task
         run: bundle exec rake
