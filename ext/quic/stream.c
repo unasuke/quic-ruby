@@ -244,6 +244,19 @@ quic_stream_eof_p(VALUE self)
   return (RSTRING_LEN(buffer) == 0 && s->fin_received) ? Qtrue : Qfalse;
 }
 
+/* True once the stream is fully closed: both directions have finished (FIN
+   or reset) and everything sent has been acknowledged. Stays false if the
+   connection closes first, since ngtcp2 does not report stream closure then.
+   Keeps returning true after the stream has left the connection's @streams.
+   A bare Stream is never closed. */
+static VALUE
+quic_stream_closed_p(VALUE self)
+{
+  quic_stream_t *s;
+  TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
+  return s->closed ? Qtrue : Qfalse;
+}
+
 static VALUE
 quic_stream_close_read_m(VALUE self)
 {
@@ -314,6 +327,7 @@ Init_quic_stream(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICStream, "close_write", quic_stream_close_write_m, 0);
   rb_define_method(rb_cQUICStream, "read_nonblock", quic_stream_read_nonblock_m, 1);
   rb_define_method(rb_cQUICStream, "eof?", quic_stream_eof_p, 0);
+  rb_define_method(rb_cQUICStream, "closed?", quic_stream_closed_p, 0);
   rb_define_method(rb_cQUICStream, "close_read", quic_stream_close_read_m, 0);
   rb_define_method(rb_cQUICStream, "close", quic_stream_close_m, 0);
   rb_define_method(rb_cQUICStream, "reset", quic_stream_reset_m, -1);

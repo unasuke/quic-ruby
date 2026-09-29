@@ -19,7 +19,7 @@ module QUIC
     end
 
     class CryptoError < Error
-      # The TLS alert this client sent when the handshake failed in
+      # The TLS alert this endpoint sent when the handshake failed in
       # #read_pkt, or nil. Alerts received from the peer are not recorded.
       attr_reader tls_alert: Integer?
     end
@@ -89,6 +89,8 @@ module QUIC
   end
 
   module Connection
+    # The I/O loop shared by Client and Server. An internal implementation
+    # detail: not meant to be included in other classes.
     module Pump
       def bind: (untyped sock) -> self
       def bound_socket: () -> untyped
@@ -96,14 +98,14 @@ module QUIC
       def pump_once: (?timeout: Float?) -> void
       def pump_until: () { () -> boolish } -> void
 
-      # Pops the next peer-initiated (server) stream off the accept queue,
-      # driving the I/O loop until one arrives. timeout: nil blocks forever
+      # Pops the next peer-initiated stream off the accept queue, driving
+      # the I/O loop until one arrives. timeout: nil blocks forever
       # (requires #bind), timeout: 0 returns immediately, timeout: Numeric
       # blocks up to that many seconds. Returns nil on timeout.
       def accept_stream: (?timeout: Numeric?) -> Stream?
 
-      # Non-blocking #accept_stream. Returns the next queued server stream,
-      # or raises QUIC::Error::WaitReadable when the queue is empty.
+      # Non-blocking #accept_stream. Returns the next queued peer-initiated
+      # stream, or raises QUIC::Error::WaitReadable when the queue is empty.
       def accept_stream_nonblock: () -> Stream
     end
 
@@ -136,7 +138,7 @@ module QUIC
 
       # Sends an application CONNECTION_CLOSE (frame type 0x1d) to the peer
       # carrying error_code and reason, then transitions the underlying
-      # ngtcp2_conn to the closing period. Requires Client#bind to have been
+      # ngtcp2_conn to the closing period. Requires #bind to have been
       # called; raises QUIC::Error::NotBound otherwise. A second #close call
       # after the connection has already entered the closing or draining
       # period is a no-op.
@@ -147,6 +149,24 @@ module QUIC
       include Pump
 
       attr_reader remote_address: Addrinfo
+
+      # Waits for the first datagram on sock (bound to the listen address,
+      # not connected), connects sock to its sender, and returns a Server
+      # for that one client; call #run to complete the handshake.
+      # - The wait has no timeout; close sock from another thread to give up.
+      # - If anything fails after the first datagram arrived, sock stays
+      #   connected to its sender: discard it and accept on a new socket.
+      # - settings must name at least one ALPN protocol; leaving it out
+      #   raises ArgumentError, since QUIC::Settings.default has none.
+      # - The certificate file is PEM, the leaf certificate first and then
+      #   any intermediates.
+      def self.accept: (
+        sock: untyped,
+        certificate_path: String | _ToPath,
+        private_key_path: String | _ToPath,
+        ?transport_params: TransportParams?,
+        ?settings: Settings?
+      ) -> Server
 
       # Builds a server connection from initial_packet, the first datagram a
       # client sent; feed that datagram to #read_pkt afterwards. The
@@ -196,10 +216,11 @@ module QUIC
     def read: (?Integer? length) -> String?
     def read_nonblock: (Integer length) -> String
 
-    # Blocks (by internally calling Client#pump_once) until the peer's flow
-    # control window has room for the full payload, then queues all bytes
-    # and returns data.bytesize. Requires the parent Client to be bound to
-    # a socket via Client#bind; raises QUIC::Error::NotBound otherwise.
+    # Blocks (by internally calling #pump_once on the owning Client or
+    # Server) until the peer's flow control window has room for the full
+    # payload, then queues all bytes and returns data.bytesize. Requires the
+    # owning connection to be bound to a socket via #bind; raises
+    # QUIC::Error::NotBound otherwise.
     def write: (String data, ?fin: bool) -> Integer
 
     # Non-blocking variant. Queues as much of `data` as the current flow
@@ -210,6 +231,14 @@ module QUIC
     # re-issue with `fin: true` on the trailing chunk.
     def write_nonblock: (String data, ?fin: bool) -> Integer
     def eof?: () -> bool
+
+    # True once the stream is fully closed: both directions have finished
+    # (FIN or reset) and everything sent has been acknowledged. Stays false
+    # if the connection closes first, since ngtcp2 does not report stream
+    # closure then. Keeps returning true after the stream has left the
+    # connection. A bare Stream is never closed.
+    def closed?: () -> bool
+
     def close_write: () -> nil
     def close_read: () -> nil
     def close: () -> nil

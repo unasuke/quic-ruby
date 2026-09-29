@@ -171,15 +171,55 @@ module QUIC
       end
     end
 
-    # One server-side connection. Built by Server._accept from the first
-    # datagram a client sent; there is no public Server.new, since an object
-    # without an ngtcp2 connection behind it would be unusable.
+    # One server-side connection. Built by Server.accept (or Server._accept)
+    # from the first datagram a client sent; there is no public Server.new,
+    # since an object without an ngtcp2 connection behind it would be
+    # unusable.
     class Server
       include Pump
 
       attr_reader :remote_address
 
       private_class_method :new
+
+      # Wait for the first datagram on sock and build a connection for its
+      # sender. sock must be bound to the listen address and not connected.
+      # It is connected to the first sender, so this Server serves exactly
+      # that one client and shares the I/O loop with Client as is. The
+      # handshake is left to #run.
+      #
+      # The wait for the first datagram has no timeout; close sock from
+      # another thread to give up. If anything fails after that datagram
+      # arrived, sock stays connected to its sender: discard it and accept on
+      # a new socket. accept never closes sock; its lifetime is the caller's.
+      #
+      # settings must name at least one ALPN protocol, so the default
+      # (QUIC::Settings.default) raises ArgumentError.
+      def self.accept(sock:, certificate_path:, private_key_path:, transport_params: nil, settings: nil)
+        data, sender = sock.recvfrom(2048)
+        sock.connect(sender[3], sender[1])
+        # Read both addresses back from the connected socket so that the path
+        # given to ngtcp2 here and every later read_pkt path come from one
+        # source and always match.
+        local_sockaddr = sock.local_address.to_sockaddr
+        remote_sockaddr = sock.remote_address.to_sockaddr
+
+        server = _accept(
+          initial_packet: data,
+          local_sockaddr: local_sockaddr,
+          remote_sockaddr: remote_sockaddr,
+          certificate_path: certificate_path,
+          private_key_path: private_key_path,
+          transport_params: transport_params || QUIC::TransportParams.default,
+          settings: settings || QUIC::Settings.default
+        )
+        server.instance_variable_set(:@local_sockaddr, local_sockaddr)
+        server.instance_variable_set(:@remote_sockaddr, remote_sockaddr)
+        server.instance_variable_set(:@remote_address, sock.remote_address)
+        server.bind(sock)
+        server.read_pkt(data, local_sockaddr: local_sockaddr, remote_sockaddr: remote_sockaddr)
+        server
+      end
     end
   end
 end
