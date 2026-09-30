@@ -7,6 +7,7 @@
 ### Changed
 - The extension no longer uses the ngtcp2 functions and callbacks deprecated in 1.22.0 and 1.23.0, and calls their `*2` replacements instead. Behavior is unchanged. ([#8](https://github.com/unasuke/quic-ruby/pull/8))
 - `#accept_stream_nonblock` now raises `QUIC::Error::WaitReadable` with "no peer-initiated stream available" (was "no server-initiated stream available"), as it serves `QUIC::Connection::Server` too. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
+- picotls's `lib/pembase64.c`, a PEM loader nothing uses, is no longer built at install time, so every picotls source compiled into the gem is MIT licensed. ([#10](https://github.com/unasuke/quic-ruby/pull/10))
 
 ## [0.0.2] - 2026-09-27
 

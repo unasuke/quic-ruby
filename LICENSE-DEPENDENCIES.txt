@@ -57,9 +57,8 @@ picotls f07f1c8 -- https://github.com/h2o/picotls
 -------------------------------------------------
 
 picotls has no top-level license file; the terms are stated in the header of
-each source file. Of the files compiled into libpicotls.a, lib/picotls.c,
-lib/hpke.c and lib/openssl.c are MIT licensed, while lib/pembase64.c is under
-an ISC-style license. Both texts are reproduced below.
+each source file. The files compiled into libpicotls.a, lib/picotls.c,
+lib/hpke.c and lib/openssl.c, are MIT licensed; the text is reproduced below.
 
 The MIT License
 
@@ -83,19 +82,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
-
-The ISC-style license
-
-Copyright (c) 2016 Christian Huitema <huitema@huitema.net>
-
-Permission to use, copy, modify, and distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

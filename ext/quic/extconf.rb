@@ -10,8 +10,9 @@ NGTCP2_SHA256 = "1c0843076528a87b65e9a9d455100941f4cb65d44f96c5da6ae56df14604395
 # The picotls revision that ngtcp2 1.25.0 is tested against (see ngtcp2's README).
 PICOTLS_COMMIT = "f07f1c8c68b237f1468bc1f1fe1b68aba3ff23b4"
 PICOTLS_SHA256 = "6ecb4f8d9946c2b9342300b29627dc34e746a551d438d35af325a4495d62a6e3"
-# Bump when ext/quic/patches/picotls/ changes; installed? only checks for the archive.
-PICOTLS_PATCH_LEVEL = "p1"
+# Bump when ext/quic/patches/picotls/ or PicotlsRecipe::SOURCES changes;
+# installed? only checks for the archive.
+PICOTLS_PATCH_LEVEL = "p2"
 
 # Locate the host's libcrypto. ngtcp2 and picotls are vendored and statically
 # linked, but the crypto primitives and X.509 come from whatever OpenSSL (or
@@ -39,10 +40,12 @@ end
 openssl_cflags = pkg_config("openssl", "cflags-only-I").to_s.strip
 
 # picotls has no release tarballs, and its CMake build needs the picotest
-# submodule, which GitHub archive tarballs do not contain. Build only the two
-# libraries we need (core + OpenSSL-API backend) into a single libpicotls.a.
+# submodule, which GitHub archive tarballs do not contain. Build only what
+# quic.so uses into a single libpicotls.a: the core and the OpenSSL-API
+# backend. The core's lib/pembase64.c, a PEM loader, is left out; the server
+# reads its certificates with libcrypto instead.
 class PicotlsRecipe < MiniPortile
-  SOURCES = %w[lib/picotls.c lib/hpke.c lib/pembase64.c lib/openssl.c].freeze
+  SOURCES = %w[lib/picotls.c lib/hpke.c lib/openssl.c].freeze
 
   attr_accessor :openssl_cflags
 
