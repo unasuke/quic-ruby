@@ -3,8 +3,7 @@
 # Stream API demo: open a bidirectional stream, write a small payload with
 # FIN, then block on Stream#read until the peer echoes the bytes back and
 # closes its side. Requires a local QUIC echo server (default: 127.0.0.1:4433
-# with ALPN "perf"); ngtcp2 ships an examples/server binary that does this
-# when built with --enable-examples.
+# with ALPN "perf"), such as examples/echo_server_demo.rb.
 #
 # Override the target via env vars:
 #   QUIC_ECHO_HOST  (default 127.0.0.1)
@@ -12,10 +11,10 @@
 #   QUIC_ECHO_ALPN  (default perf)
 #   QUIC_ECHO_CA_FILE (default unset: the server certificate is not verified)
 #
-# The echo server usually runs with a self-signed certificate, so
-# verification is off unless QUIC_ECHO_CA_FILE names a CA to trust. When it
-# is set, the certificate must match QUIC_ECHO_HOST, which means an IP SAN
-# of 127.0.0.1 with the default host.
+# examples/echo_server_demo.rb prints the path of the CA it generated; pass
+# it as QUIC_ECHO_CA_FILE to verify the certificate. Verification is off
+# without it. When it is set, the certificate must match QUIC_ECHO_HOST,
+# which means an IP SAN of 127.0.0.1 with the default host.
 #
 # Run with: bundle exec ruby examples/echo_demo.rb
 

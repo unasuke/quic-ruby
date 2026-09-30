@@ -50,9 +50,34 @@ More complete programs live in [`examples/`](examples/):
 
 - [`handshake_demo.rb`](examples/handshake_demo.rb): prints the library versions and times a handshake.
 - [`echo_demo.rb`](examples/echo_demo.rb): exchanges data on a stream with a local echo server.
+- [`echo_server_demo.rb`](examples/echo_server_demo.rb): the echo server for `echo_demo.rb`, generating its own certificate.
 - [`doq_demo.rb`](examples/doq_demo.rb): sends a DNS over QUIC query.
 - [`io_loop_demo.rb`](examples/io_loop_demo.rb): sends the same query from an I/O loop the script owns, calling `#write_pkt` / `#read_pkt` / `#handle_expiry` itself.
 - [`verify_demo.rb`](examples/verify_demo.rb): tries the certificate verification settings described below against a public server.
+
+### Server
+
+```ruby
+require "quic"
+require "socket"
+
+sock = UDPSocket.new(Socket::AF_INET)
+sock.bind("127.0.0.1", 4433)
+server = QUIC::Connection::Server.accept(
+  sock: sock, certificate_path: "server.pem", private_key_path: "server.key",
+  settings: QUIC::Settings.default.with(alpn: ["perf"])
+)
+server.run # completes the handshake
+stream = server.accept_stream
+stream.write(stream.read, fin: true) # echo everything up to the client's FIN
+begin
+  server.pump_until { stream.closed? }
+rescue QUIC::Error::Closed
+  # the client closed the connection before the stream finished
+end
+```
+
+`accept` connects the socket to the first client that sends to it and serves that one connection only. [`echo_server_demo.rb`](examples/echo_server_demo.rb) generates its own certificate, so it runs as is against `echo_demo.rb`.
 
 ### Certificate verification
 
@@ -74,7 +99,7 @@ settings = QUIC::Settings.default.with(alpn: ["perf"], verify_mode: :none)
 
 - **No certificate revocation checking.** CRLs and OCSP are not consulted.
 - **No session resumption or 0-RTT.**
-- **No server side.** Only the client (`QUIC::Connection::Client`) exists; there is no listen/accept.
+- **The server handles one connection per socket.** `QUIC::Connection::Server.accept` serves the first client that sends to the socket; there is no Retry, address validation, Version Negotiation, or client certificate authentication.
 - **Key exchanges and cipher suites are fixed.** X25519, secp256r1 and secp384r1 with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305. They cannot be selected from Ruby.
 
 ## Development
@@ -91,7 +116,7 @@ Bug reports and pull requests are welcome on GitHub at https://github.com/unasuk
 
 The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
 
-The gem ships no third-party binaries: [ngtcp2](https://github.com/ngtcp2/ngtcp2) (MIT, with portions under the Chromium BSD-3-Clause license) and [picotls](https://github.com/h2o/picotls) (MIT, with one file under an ISC-style license) are downloaded and built on the installing machine, and libcrypto is the host's. Their license texts are in [LICENSE-DEPENDENCIES.txt](LICENSE-DEPENDENCIES.txt) for reference.
+The gem ships no third-party binaries: [ngtcp2](https://github.com/ngtcp2/ngtcp2) (MIT, with an embedded PCG random number generator under Apache-2.0 OR MIT) and [picotls](https://github.com/h2o/picotls) (MIT, with one file under an ISC-style license) are downloaded and built on the installing machine, and libcrypto is the host's. Their license texts are in [LICENSE-DEPENDENCIES.txt](LICENSE-DEPENDENCIES.txt) for reference.
 
 ## Code of Conduct
 

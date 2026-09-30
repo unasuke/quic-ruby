@@ -1,4 +1,5 @@
 #include "stream.h"
+#include "connection_common.h"
 
 #include <string.h>
 
@@ -33,7 +34,7 @@ quic_stream_alloc(VALUE klass)
 }
 
 VALUE
-quic_stream_new(int64_t stream_id, VALUE client)
+quic_stream_new(int64_t stream_id, VALUE owner)
 {
   VALUE self = quic_stream_alloc(rb_cQUICStream);
   quic_stream_t *s;
@@ -41,7 +42,7 @@ quic_stream_new(int64_t stream_id, VALUE client)
   s->stream_id = stream_id;
 
   rb_ivar_set(self, rb_intern("@id"), LL2NUM(stream_id));
-  rb_ivar_set(self, rb_intern("@client"), client);
+  rb_ivar_set(self, rb_intern("@client"), owner);
   rb_ivar_set(self, rb_intern("@pending_chunks"), rb_ary_new());
   /* recv_buffer is a binary String; rb_str_buf_new returns ASCII-8BIT. */
   rb_ivar_set(self, rb_intern("@recv_buffer"), rb_str_buf_new(0));
@@ -101,17 +102,17 @@ quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data)
 static uint64_t
 quic_stream_window_left(VALUE client_v, quic_stream_t *s)
 {
-  ngtcp2_conn *conn = quic_client_conn(client_v);
+  ngtcp2_conn *conn = quic_conn_ptr(client_v);
   uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
   uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
   return stream_left < conn_left ? stream_left : conn_left;
 }
 
-/* Blocking write: block by repeatedly invoking Client#pump_once until the
-   peer's flow control window has enough room for the full payload, then
-   enqueue. IO#write-compatible: always queues all of `data`. Bare Streams
-   (built via QUIC::Stream.allocate for unit tests, with @client = nil) skip
-   the window check entirely. */
+/* Blocking write: block by repeatedly invoking #pump_once on the owning
+   connection (@client) until the peer's flow control window has enough room
+   for the full payload, then enqueue. IO#write-compatible: always queues all
+   of `data`. Bare Streams (built via QUIC::Stream.allocate for unit tests,
+   with @client = nil) skip the window check entirely. */
 static VALUE
 quic_stream_write_m(int argc, VALUE *argv, VALUE self)
 {
@@ -132,8 +133,8 @@ quic_stream_write_m(int argc, VALUE *argv, VALUE self)
     quic_stream_t *s;
     TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
     /* Loop until the full payload would fit in the current window. pump_once
-       raises QUIC::Error::NotBound if @client has no socket bound; that
-       error surfaces verbatim. */
+       raises QUIC::Error::NotBound if the connection has not been #bind'ed;
+       that error surfaces verbatim. */
     while ((uint64_t)needed > quic_stream_window_left(client_v, s)) {
       rb_funcall(client_v, rb_intern("pump_once"), 0);
     }
@@ -243,6 +244,19 @@ quic_stream_eof_p(VALUE self)
   return (RSTRING_LEN(buffer) == 0 && s->fin_received) ? Qtrue : Qfalse;
 }
 
+/* True once the stream is fully closed: both directions have finished (FIN
+   or reset) and everything sent has been acknowledged. Stays false if the
+   connection closes first, since ngtcp2 does not report stream closure then.
+   Keeps returning true after the stream has left the connection's @streams.
+   A bare Stream is never closed. */
+static VALUE
+quic_stream_closed_p(VALUE self)
+{
+  quic_stream_t *s;
+  TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
+  return s->closed ? Qtrue : Qfalse;
+}
+
 static VALUE
 quic_stream_close_read_m(VALUE self)
 {
@@ -250,7 +264,7 @@ quic_stream_close_read_m(VALUE self)
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
   VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
-  ngtcp2_conn *conn = quic_client_conn(client_v);
+  ngtcp2_conn *conn = quic_conn_ptr(client_v);
 
   /* ngtcp2_conn_shutdown_stream_read sends STOP_SENDING. app_error_code 0
      since no QUIC-level error API is exposed yet. */
@@ -296,7 +310,7 @@ quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
     return Qnil;
   }
 
-  ngtcp2_conn *conn = quic_client_conn(client_v);
+  ngtcp2_conn *conn = quic_conn_ptr(client_v);
   int rv = ngtcp2_conn_shutdown_stream_write(conn, 0, s->stream_id, error_code);
   if (rv != 0) quic_raise_ngtcp2_error(rv);
   s->reset = true;
@@ -313,6 +327,7 @@ Init_quic_stream(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICStream, "close_write", quic_stream_close_write_m, 0);
   rb_define_method(rb_cQUICStream, "read_nonblock", quic_stream_read_nonblock_m, 1);
   rb_define_method(rb_cQUICStream, "eof?", quic_stream_eof_p, 0);
+  rb_define_method(rb_cQUICStream, "closed?", quic_stream_closed_p, 0);
   rb_define_method(rb_cQUICStream, "close_read", quic_stream_close_read_m, 0);
   rb_define_method(rb_cQUICStream, "close", quic_stream_close_m, 0);
   rb_define_method(rb_cQUICStream, "reset", quic_stream_reset_m, -1);

@@ -25,6 +25,9 @@ module QUIC
     # it; later changes to those variables or to the CA bundle are not picked
     # up. Setting ca_file or ca_path trusts only the certificates found there.
     # With verify_mode :none, ca_file and ca_path are ignored.
+    #
+    # Only a client uses verify_mode, ca_file and ca_path. A server ignores
+    # them, since it does not ask for a client certificate.
     def initialize(verify_mode: :peer, ca_file: nil, ca_path: nil, **rest)
       super
     end

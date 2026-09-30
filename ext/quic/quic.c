@@ -4,6 +4,7 @@
 VALUE rb_mQUIC;
 VALUE rb_mQUICConnection;
 VALUE rb_cQUICConnectionClient;
+VALUE rb_cQUICConnectionServer;
 
 VALUE rb_eQUICError;
 VALUE rb_eQUICErrorProto;
@@ -96,7 +97,7 @@ Init_quic(void)
   rb_eQUICErrorRetry = rb_define_class_under(rb_eQUICError, "Retry", rb_eQUICError);
   rb_eQUICErrorClosed = rb_define_class_under(rb_eQUICError, "Closed", rb_eQUICError);
   rb_eQUICErrorCryptoError = rb_define_class_under(rb_eQUICError, "CryptoError", rb_eQUICError);
-  /* The TLS alert this client sent, when read_pkt fails in the handshake.
+  /* The TLS alert this endpoint sent, when read_pkt fails in the handshake.
      Alerts received from the peer are not recorded by ngtcp2. */
   rb_define_attr(rb_eQUICErrorCryptoError, "tls_alert", 1, 0);
   rb_eQUICErrorCertificateVerifyFailed =
@@ -122,5 +123,6 @@ Init_quic(void)
   rb_eQUICErrorNotBound = rb_define_class_under(rb_eQUICError, "NotBound", rb_eQUICError);
 
   Init_quic_connection_client(rb_mQUICConnection);
+  Init_quic_connection_server(rb_mQUICConnection);
   Init_quic_stream(rb_mQUIC);
 }

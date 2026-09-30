@@ -6,13 +6,13 @@ require "socket"
 # Stream echo round-trip against a local QUIC echo server.
 # Skipped by default; set EXTERNAL=1 and have a server listening at
 # QUIC_ECHO_HOST:QUIC_ECHO_PORT (defaults 127.0.0.1:4433) speaking ALPN
-# QUIC_ECHO_ALPN (default "perf"). The ngtcp2 source tree's
-# examples/server (built with --enable-examples) implements this.
+# QUIC_ECHO_ALPN (default "perf"). examples/echo_server_demo.rb implements
+# this.
 #
-# That server usually runs with a self-signed certificate, so the server
-# certificate is not verified unless QUIC_ECHO_CA_FILE names a CA to trust.
-# When it is set, the certificate must match QUIC_ECHO_HOST, which means an
-# IP SAN of 127.0.0.1 with the default host.
+# That server prints the path of the CA it generated; pass it as
+# QUIC_ECHO_CA_FILE to verify the certificate. Verification is off without
+# it. When it is set, the certificate must match QUIC_ECHO_HOST, which means
+# an IP SAN of 127.0.0.1 with the default host.
 class TestQUICEchoE2E < Minitest::Test
   TARGET_HOST = ENV.fetch("QUIC_ECHO_HOST", "127.0.0.1")
   TARGET_PORT = Integer(ENV.fetch("QUIC_ECHO_PORT", "4433"))

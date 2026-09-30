@@ -4,7 +4,8 @@ module QUIC
   # QUIC::Stream is defined in the C extension (ext/quic/stream.c); this file
   # reopens it to add the bits that are easier to express in Ruby:
   # #initiator (a tiny lookup over @id) and the blocking #read which wraps
-  # the C #read_nonblock with an internal Client#pump_once loop.
+  # the C #read_nonblock with an internal #pump_once loop on the owning
+  # connection (@client, a Client or Server).
   class Stream
     INITIATORS = %i[client_bidi server_bidi client_uni server_uni].freeze
 
@@ -17,8 +18,8 @@ module QUIC
       INITIATORS[@id & 0b11]
     end
 
-    # IO#read-compatible blocking read. Requires the parent Client to have
-    # been #bind'ed to a socket (raised via Client#pump_once otherwise).
+    # IO#read-compatible blocking read. Requires the owning connection to
+    # have been #bind'ed to a socket (raised via its #pump_once otherwise).
     #
     #   read(length): block until at least 1 byte is available or EOF,
     #                 return up to `length` bytes, return nil at EOF.
