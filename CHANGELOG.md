@@ -1,7 +1,12 @@
 ## [Unreleased]
 
+### Added
+- `QUIC::Connection::Server` serves a single connection per UDP socket. `Server.accept(sock:, certificate_path:, private_key_path:, transport_params: nil, settings: nil)` waits for the first datagram, connects the socket to its sender and returns a Server whose handshake `#run` completes; streams, `#accept_stream` and `#close` then work as on a Client. The certificate file is PEM, leaf first, and `settings` must name at least one ALPN protocol; `verify_mode`, `ca_file` and `ca_path` are ignored, since no client certificate is requested. A certificate or key that cannot be loaded or used, or an empty ALPN list, raises `ArgumentError`; a first datagram that cannot start a connection raises `QUIC::Error::Proto`. There is no Retry, address validation or Version Negotiation, and `Server.new` is private. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
+- `QUIC::Stream#closed?` returns true once both directions of the stream have finished and everything sent has been acknowledged. It stays false if the connection closes first. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
+
 ### Changed
 - The extension no longer uses the ngtcp2 functions and callbacks deprecated in 1.22.0 and 1.23.0, and calls their `*2` replacements instead. Behavior is unchanged. ([#8](https://github.com/unasuke/quic-ruby/pull/8))
+- `#accept_stream_nonblock` now raises `QUIC::Error::WaitReadable` with "no peer-initiated stream available" (was "no server-initiated stream available"), as it serves `QUIC::Connection::Server` too. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
 
 ## [0.0.2] - 2026-09-27
 
