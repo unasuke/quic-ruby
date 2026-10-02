@@ -116,7 +116,7 @@ Bug reports and pull requests are welcome on GitHub at https://github.com/unasuk
 
 The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
 
-The gem ships no third-party binaries: [ngtcp2](https://github.com/ngtcp2/ngtcp2) (MIT, with an embedded PCG random number generator under Apache-2.0 OR MIT) and [picotls](https://github.com/h2o/picotls) (MIT, with one file under an ISC-style license) are downloaded and built on the installing machine, and libcrypto is the host's. Their license texts are in [LICENSE-DEPENDENCIES.txt](LICENSE-DEPENDENCIES.txt) for reference.
+The gem ships no third-party binaries: [ngtcp2](https://github.com/ngtcp2/ngtcp2) (MIT, with an embedded PCG random number generator under Apache-2.0 OR MIT) and [picotls](https://github.com/h2o/picotls) (MIT) are downloaded and built on the installing machine, and libcrypto is the host's. Their license texts are in [LICENSE-DEPENDENCIES.txt](LICENSE-DEPENDENCIES.txt) for reference.
 
 ## Code of Conduct
 
