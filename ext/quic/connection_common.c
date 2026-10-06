@@ -613,6 +613,67 @@ quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
   return Qnil;
 }
 
+/* #write_pkt for the QUIC::Stream mode. If any stream has pending bytes or
+   a pending FIN, route the packet through ngtcp2_conn_writev_stream so the
+   stream data gets framed alongside connection-level frames. Falls back to
+   conn-only when no stream is queued. Returns what ngtcp2 returned. */
+static ngtcp2_ssize
+quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
+                            ngtcp2_pkt_info *pi, uint8_t *dest, size_t destlen)
+{
+  ngtcp2_vec datav;
+  size_t datavcnt = 0;
+  uint32_t writev_flags = 0;
+  int64_t send_stream_id = -1;
+  VALUE selected_stream = quic_conn_pick_send_stream(
+    self, &datav, &datavcnt, &writev_flags, &send_stream_id);
+
+  ngtcp2_ssize pdatalen = -1;
+  ngtcp2_ssize n = ngtcp2_conn_writev_stream(
+    c->conn, path, pi, dest, destlen, &pdatalen,
+    writev_flags, send_stream_id, &datav, datavcnt, quic_now());
+
+  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
+    /* The stream's queued data is beyond what the peer's flow control lets
+       through right now. Keep it queued and build the packet without it, so
+       that ACKs and other frames still go out; the data follows once the
+       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
+    selected_stream = Qnil;
+    datavcnt = 0;
+    writev_flags = 0;
+    pdatalen = -1;
+    n = ngtcp2_conn_writev_stream(c->conn, path, pi, dest, destlen, &pdatalen,
+                                  0, -1, NULL, 0, quic_now());
+  }
+
+  if (n < 0 || !NIL_P(c->pending_exc)) return n;
+
+  /* Update the selected stream's accounting only when we actually sent
+     bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
+     packet; if 0, no data was framed (but the packet may still contain ACK
+     or other frames). */
+  if (!NIL_P(selected_stream) && pdatalen > 0) {
+    quic_stream_t *s;
+    TypedData_Get_Struct(selected_stream, quic_stream_t,
+                         &quic_stream_data_type, s);
+    s->sent_offset += (uint64_t)pdatalen;
+    /* FIN is only actually written when all requested data fits in the
+       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
+    if ((writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN) &&
+        (size_t)pdatalen == datav.len) {
+      s->fin_flushed = true;
+    }
+  } else if (!NIL_P(selected_stream) && datavcnt == 0 && n > 0 &&
+             (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
+    /* FIN-only packet (no data) was successfully written. */
+    quic_stream_t *s;
+    TypedData_Get_Struct(selected_stream, quic_stream_t,
+                         &quic_stream_data_type, s);
+    s->fin_flushed = true;
+  }
+  return n;
+}
+
 static VALUE
 quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
 {
@@ -644,35 +705,7 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   uint8_t *dest = (uint8_t *)RSTRING_PTR(buffer);
   size_t destlen = (size_t)QUIC_WRITE_PKT_BUFLEN;
 
-  /* Stream-aware path: if any stream has pending bytes or a pending FIN,
-     route the packet through ngtcp2_conn_writev_stream so the stream data
-     gets framed alongside connection-level frames. Falls back to conn-only
-     when no stream is queued. */
-  ngtcp2_vec datav;
-  size_t datavcnt = 0;
-  uint32_t writev_flags = 0;
-  int64_t send_stream_id = -1;
-  VALUE selected_stream = quic_conn_pick_send_stream(
-    self, &datav, &datavcnt, &writev_flags, &send_stream_id);
-
-  ngtcp2_ssize pdatalen = -1;
-  ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-    c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
-    writev_flags, send_stream_id, &datav, datavcnt, quic_now());
-
-  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
-    /* The stream's queued data is beyond what the peer's flow control lets
-       through right now. Keep it queued and build the packet without it, so
-       that ACKs and other frames still go out; the data follows once the
-       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
-    selected_stream = Qnil;
-    datavcnt = 0;
-    writev_flags = 0;
-    pdatalen = -1;
-    n = ngtcp2_conn_writev_stream(
-      c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
-      0, -1, NULL, 0, quic_now());
-  }
+  ngtcp2_ssize n = quic_conn_write_pkt_streams(self, c, &path_storage.path, &pi, dest, destlen);
 
   if (!NIL_P(c->pending_exc)) {
     rb_str_set_len(buffer, 0);
@@ -684,30 +717,6 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
        that a rescued caller cannot accidentally transmit stale bytes. */
     rb_str_set_len(buffer, 0);
     quic_raise_ngtcp2_error((int)n);
-  }
-
-  /* Update the selected stream's accounting only when we actually sent
-     bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
-     packet; if 0, no data was framed (but the packet may still contain ACK
-     or other frames). */
-  if (!NIL_P(selected_stream) && pdatalen > 0) {
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
-    s->sent_offset += (uint64_t)pdatalen;
-    /* FIN is only actually written when all requested data fits in the
-       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
-    if ((writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN) &&
-        (size_t)pdatalen == datav.len) {
-      s->fin_flushed = true;
-    }
-  } else if (!NIL_P(selected_stream) && datavcnt == 0 && n > 0 &&
-             (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
-    /* FIN-only packet (no data) was successfully written. */
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
-    s->fin_flushed = true;
   }
 
   if (n == 0) {
