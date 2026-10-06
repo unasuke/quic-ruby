@@ -544,6 +544,20 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
     c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
     writev_flags, send_stream_id, &datav, datavcnt, quic_now());
 
+  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
+    /* The stream's queued data is beyond what the peer's flow control lets
+       through right now. Keep it queued and build the packet without it, so
+       that ACKs and other frames still go out; the data follows once the
+       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
+    selected_stream = Qnil;
+    datavcnt = 0;
+    writev_flags = 0;
+    pdatalen = -1;
+    n = ngtcp2_conn_writev_stream(
+      c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
+      0, -1, NULL, 0, quic_now());
+  }
+
   if (n < 0) {
     /* ngtcp2 does not partially write on failure, but truncate explicitly so
        that a rescued caller cannot accidentally transmit stale bytes. */

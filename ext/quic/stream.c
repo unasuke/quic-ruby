@@ -97,15 +97,28 @@ quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data)
   return RTEST(fin);
 }
 
-/* Return the effective send window for this stream, capped by both the
-   per-stream and the per-connection flow control limits ngtcp2 tracks. */
+/* Return the effective send window for this stream: the smaller of the
+   per-stream and the per-connection flow control limits ngtcp2 tracks, less
+   the bytes already queued in @pending_chunks but not yet handed to ngtcp2.
+   ngtcp2 only counts what it has sent, so without the subtraction a run of
+   writes could queue far more than the peer allows. */
 static uint64_t
-quic_stream_window_left(VALUE client_v, quic_stream_t *s)
+quic_stream_window_left(VALUE self, VALUE client_v, quic_stream_t *s)
 {
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
   uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
   uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
-  return stream_left < conn_left ? stream_left : conn_left;
+  uint64_t left = stream_left < conn_left ? stream_left : conn_left;
+
+  /* @pending_chunks starts at stream offset pending_shifted, and the bytes
+     up to sent_offset have been sent. */
+  VALUE pending = rb_ivar_get(self, rb_intern("@pending_chunks"));
+  uint64_t queued_end = s->pending_shifted;
+  for (long i = 0; i < RARRAY_LEN(pending); i++) {
+    queued_end += (uint64_t)RSTRING_LEN(RARRAY_AREF(pending, i));
+  }
+  uint64_t unsent = queued_end - s->sent_offset;
+  return left > unsent ? left - unsent : 0;
 }
 
 /* Blocking write: block by repeatedly invoking #pump_once on the owning
@@ -135,7 +148,7 @@ quic_stream_write_m(int argc, VALUE *argv, VALUE self)
     /* Loop until the full payload would fit in the current window. pump_once
        raises QUIC::Error::NotBound if the connection has not been #bind'ed;
        that error surfaces verbatim. */
-    while ((uint64_t)needed > quic_stream_window_left(client_v, s)) {
+    while ((uint64_t)needed > quic_stream_window_left(self, client_v, s)) {
       rb_funcall(client_v, rb_intern("pump_once"), 0);
     }
   }
@@ -170,7 +183,7 @@ quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self)
 
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
-  uint64_t avail = quic_stream_window_left(client_v, s);
+  uint64_t avail = quic_stream_window_left(self, client_v, s);
 
   if (avail == 0) {
     rb_raise(rb_eQUICErrorWaitWritable, "stream send window is full");
