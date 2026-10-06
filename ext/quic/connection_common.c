@@ -467,9 +467,14 @@ quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                      uint64_t app_error_code, void *user_data,
                      void *stream_user_data)
 {
-  (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  /* Give the peer back the bidirectional stream it has used up, as ngtcp2's
+     examples/server.cc does. Without this the peer can open only
+     initial_max_streams_bidi streams over the whole connection. */
+  if (!ngtcp2_conn_is_local_stream2(conn, stream_id) && ngtcp2_is_bidi_stream(stream_id)) {
+    ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+  }
   struct quic_stream_cb_args a = {
     .c = c, .stream_id = stream_id, .flags = flags, .app_error_code = app_error_code,
   };

@@ -92,6 +92,44 @@ class TestQUICLoopbackE2E < Minitest::Test
     stop_server(server_thread)
   end
 
+  # The server allows only 4 concurrent bidirectional streams. Opening 10
+  # one after another works only if the server raises the limit again as
+  # each stream closes.
+  def test_peer_opens_more_streams_than_initial_max_streams_bidi
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(
+        server_sock, creds,
+        transport_params: QUIC::TransportParams.default.with(initial_max_streams_bidi: 4)
+      )
+      10.times do
+        stream = server.accept_stream(timeout: 10)
+        raise "no stream accepted within 10 seconds" if stream.nil?
+        stream.write(stream.read, fin: true)
+      end
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection after its last stream.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    10.times do |i|
+      stream = open_bidi_stream_when_allowed(client)
+      stream.write("stream #{i}", fin: true)
+      assert_equal "stream #{i}", stream.read
+    end
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
   # Ruby code inside an ngtcp2 callback that raises must not unwind through
   # ngtcp2. With the client's stream registry frozen, stream_open fails when
   # the server opens a stream, and the FrozenError comes out of read_pkt.
@@ -123,11 +161,12 @@ class TestQUICLoopbackE2E < Minitest::Test
 
   private
 
-  def accept_loopback_server(server_sock, creds)
+  def accept_loopback_server(server_sock, creds, transport_params: nil)
     server = QUIC::Connection::Server.accept(
       sock: server_sock,
       certificate_path: creds.certificate_path,
       private_key_path: creds.private_key_path,
+      transport_params: transport_params,
       settings: QUIC::Settings.default.with(alpn: ALPN)
     )
     server.run
@@ -156,6 +195,20 @@ class TestQUICLoopbackE2E < Minitest::Test
       piece = data.byteslice(offset, chunk_size)
       offset += piece.bytesize
       stream.write(piece, fin: offset >= data.bytesize)
+    end
+  end
+
+  # open_bidi_stream raises while the peer's stream limit is used up. Pump
+  # until the peer raises it (MAX_STREAMS), for up to timeout seconds.
+  def open_bidi_stream_when_allowed(client, timeout: 10)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    begin
+      client.open_bidi_stream
+    rescue QUIC::Error::Unknown => e
+      raise unless e.message.include?("STREAM_ID_BLOCKED")
+      raise if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      client.pump_once(timeout: 0.1)
+      retry
     end
   end
 
