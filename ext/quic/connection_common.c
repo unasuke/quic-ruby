@@ -64,6 +64,14 @@ quic_conn_size(const void *ptr)
   return sizeof(quic_conn_t);
 }
 
+/* owner is the object wrapping this struct, so it needs no mark. */
+static void
+quic_conn_mark(void *ptr)
+{
+  quic_conn_t *c = (quic_conn_t *)ptr;
+  rb_gc_mark_movable(c->pending_exc);
+}
+
 /* GC.compact may relocate the owner connection object. Follow it so the
    void* user_data ngtcp2 callbacks receive (which equals this struct,
    stored inside owner) keeps resolving @streams / @accept_queue. The
@@ -73,11 +81,12 @@ quic_conn_compact(void *ptr)
 {
   quic_conn_t *c = (quic_conn_t *)ptr;
   c->owner = rb_gc_location(c->owner);
+  c->pending_exc = rb_gc_location(c->pending_exc);
 }
 
 const rb_data_type_t quic_conn_data_type = {
   "QUIC::Connection",
-  {NULL, quic_conn_free, quic_conn_size, quic_conn_compact,},
+  {quic_conn_mark, quic_conn_free, quic_conn_size, quic_conn_compact,},
   NULL, NULL,
   RUBY_TYPED_FREE_IMMEDIATELY,
 };
@@ -87,7 +96,35 @@ quic_conn_alloc(VALUE klass)
 {
   quic_conn_t *c = ALLOC(quic_conn_t);
   memset(c, 0, sizeof(*c));
+  c->pending_exc = Qnil;
   return TypedData_Wrap_Struct(klass, &quic_conn_data_type, c);
+}
+
+/* Re-raise the exception a callback left in c->pending_exc, if any. Called
+   right after ngtcp2 returns, before its return value is looked at: the
+   NGTCP2_ERR_CALLBACK_FAILURE it reports is the result of that exception. */
+static void
+quic_conn_raise_pending(quic_conn_t *c)
+{
+  if (NIL_P(c->pending_exc)) return;
+  VALUE exc = c->pending_exc;
+  c->pending_exc = Qnil;
+  rb_exc_raise(exc);
+}
+
+/* Run body(arg) under rb_protect. An exception is kept in c->pending_exc
+   (the first one wins; ngtcp2 stops at the first failing callback anyway)
+   and turned into NGTCP2_ERR_CALLBACK_FAILURE, so that it never unwinds
+   through ngtcp2. */
+static int
+quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg)
+{
+  int state = 0;
+  rb_protect(body, (VALUE)arg, &state);
+  if (state == 0) return 0;
+  if (NIL_P(c->pending_exc)) c->pending_exc = rb_errinfo();
+  rb_set_errinfo(Qnil);
+  return NGTCP2_ERR_CALLBACK_FAILURE;
 }
 
 quic_conn_t *
@@ -277,23 +314,76 @@ quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id)
   return rb_hash_aref(streams, LL2NUM(stream_id));
 }
 
-/* ngtcp2 stream callbacks. Each returns 0 on success or
-   NGTCP2_ERR_CALLBACK_FAILURE on Ruby-side errors. We assume rb_str_buf_cat /
-   rb_ary_* won't raise in normal operation (allocation failures aside, which
-   would abort the process anyway), so we don't wrap in rb_protect for now. */
+/* ngtcp2 stream callbacks. The Ruby-touching part of each is a *_body
+   function run under rb_protect by quic_conn_protect, so that an exception
+   (a frozen @streams, an allocation failure, ...) never unwinds through
+   ngtcp2. The callback then returns NGTCP2_ERR_CALLBACK_FAILURE and the
+   exception is re-raised once ngtcp2 has returned. */
+
+/* The arguments of a stream callback, handed to its body through
+   rb_protect's single VALUE. Each body reads only the fields it needs. */
+struct quic_stream_cb_args {
+  quic_conn_t *c;
+  int64_t stream_id;
+  uint32_t flags;
+  const uint8_t *data;
+  size_t datalen;
+  uint64_t acked;
+  uint64_t app_error_code;
+};
+
+static VALUE
+quic_stream_open_body(VALUE arg)
+{
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
+  if (!NIL_P(rb_hash_aref(streams, LL2NUM(a->stream_id)))) {
+    return Qnil;  /* already known (opened by this endpoint) */
+  }
+  VALUE stream = quic_stream_new(a->stream_id, a->c->owner);
+  rb_hash_aset(streams, LL2NUM(a->stream_id), stream);
+  return Qnil;
+}
 
 static int
 quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
 {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  VALUE streams = rb_ivar_get(c->owner, rb_intern("@streams"));
-  if (!NIL_P(rb_hash_aref(streams, LL2NUM(stream_id)))) {
-    return 0;  /* already known (opened by this endpoint) */
+  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id};
+  return quic_conn_protect(c, quic_stream_open_body, &a);
+}
+
+static VALUE
+quic_recv_stream_data_body(VALUE arg)
+{
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  quic_conn_t *c = a->c;
+  VALUE stream = quic_conn_lookup_stream(c, a->stream_id);
+  if (NIL_P(stream)) return Qnil;
+
+  quic_stream_t *s;
+  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+
+  /* Surface peer-initiated streams to #accept_stream. The low stream-id bit
+     marks the initiator (0 == client, 1 == server), so a client queues the
+     odd ids and a server the even ones. Push once, on first data arrival,
+     then mark so later data does not re-enqueue. */
+  bool peer_initiated = c->is_server ? !(a->stream_id & 0x01) : (a->stream_id & 0x01);
+  if (!s->accept_queued && peer_initiated) {
+    VALUE accept_queue = rb_ivar_get(c->owner, rb_intern("@accept_queue"));
+    rb_ary_push(accept_queue, stream);
+    s->accept_queued = true;
   }
-  VALUE stream = quic_stream_new(stream_id, c->owner);
-  rb_hash_aset(streams, LL2NUM(stream_id), stream);
-  return 0;
+
+  if (a->datalen > 0) {
+    VALUE recv_buffer = rb_ivar_get(stream, rb_intern("@recv_buffer"));
+    rb_str_buf_cat(recv_buffer, (const char *)a->data, (long)a->datalen);
+  }
+  if (a->flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+    s->fin_received = true;
+  }
+  return Qnil;
 }
 
 static int
@@ -305,48 +395,22 @@ quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
   (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  VALUE stream = quic_conn_lookup_stream(c, stream_id);
-  if (NIL_P(stream)) return 0;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-
-  /* Surface peer-initiated streams to #accept_stream. The low stream-id bit
-     marks the initiator (0 == client, 1 == server), so a client queues the
-     odd ids and a server the even ones. Push once, on first data arrival,
-     then mark so later data does not re-enqueue. */
-  bool peer_initiated = c->is_server ? !(stream_id & 0x01) : (stream_id & 0x01);
-  if (!s->accept_queued && peer_initiated) {
-    VALUE accept_queue = rb_ivar_get(c->owner, rb_intern("@accept_queue"));
-    rb_ary_push(accept_queue, stream);
-    s->accept_queued = true;
-  }
-
-  if (datalen > 0) {
-    VALUE recv_buffer = rb_ivar_get(stream, rb_intern("@recv_buffer"));
-    rb_str_buf_cat(recv_buffer, (const char *)data, (long)datalen);
-  }
-  if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
-    s->fin_received = true;
-  }
-  return 0;
+  struct quic_stream_cb_args a = {
+    .c = c, .stream_id = stream_id, .flags = flags, .data = data, .datalen = datalen,
+  };
+  return quic_conn_protect(c, quic_recv_stream_data_body, &a);
 }
 
-static int
-quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
-                                 uint64_t offset, uint64_t datalen,
-                                 void *user_data, void *stream_user_data)
+static VALUE
+quic_acked_stream_data_offset_body(VALUE arg)
 {
-  (void)conn;
-  (void)offset;
-  (void)stream_user_data;
-  quic_conn_t *c = (quic_conn_t *)user_data;
-  VALUE stream = quic_conn_lookup_stream(c, stream_id);
-  if (NIL_P(stream)) return 0;
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
+  if (NIL_P(stream)) return Qnil;
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->acked_offset += datalen;
+  s->acked_offset += a->acked;
 
   /* Shift any head Chunks of @pending_chunks whose end-offset is fully
      covered by acked_offset. Each Chunk's start-offset in the stream is
@@ -363,7 +427,39 @@ quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
       break;
     }
   }
-  return 0;
+  return Qnil;
+}
+
+static int
+quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
+                                 uint64_t offset, uint64_t datalen,
+                                 void *user_data, void *stream_user_data)
+{
+  (void)conn;
+  (void)offset;
+  (void)stream_user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .acked = datalen};
+  return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
+}
+
+static VALUE
+quic_stream_close_body(VALUE arg)
+{
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
+  VALUE stream = rb_hash_aref(streams, LL2NUM(a->stream_id));
+  if (NIL_P(stream)) return Qnil;
+
+  quic_stream_t *s;
+  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  s->closed = true;
+  if (a->flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
+    s->close_has_app_error_code = true;
+    s->close_app_error_code = a->app_error_code;
+  }
+  rb_hash_delete(streams, LL2NUM(a->stream_id));
+  return Qnil;
 }
 
 static int
@@ -374,19 +470,25 @@ quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
   (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  VALUE streams = rb_ivar_get(c->owner, rb_intern("@streams"));
-  VALUE stream = rb_hash_aref(streams, LL2NUM(stream_id));
-  if (NIL_P(stream)) return 0;
+  struct quic_stream_cb_args a = {
+    .c = c, .stream_id = stream_id, .flags = flags, .app_error_code = app_error_code,
+  };
+  return quic_conn_protect(c, quic_stream_close_body, &a);
+}
+
+static VALUE
+quic_stream_reset_body(VALUE arg)
+{
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
+  if (NIL_P(stream)) return Qnil;
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->closed = true;
-  if (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
-    s->close_has_app_error_code = true;
-    s->close_app_error_code = app_error_code;
-  }
-  rb_hash_delete(streams, LL2NUM(stream_id));
-  return 0;
+  s->reset = true;
+  s->close_app_error_code = a->app_error_code;
+  s->close_has_app_error_code = true;
+  return Qnil;
 }
 
 static int
@@ -398,15 +500,8 @@ quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
   (void)final_size;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  VALUE stream = quic_conn_lookup_stream(c, stream_id);
-  if (NIL_P(stream)) return 0;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->reset = true;
-  s->close_app_error_code = app_error_code;
-  s->close_has_app_error_code = true;
-  return 0;
+  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .app_error_code = app_error_code};
+  return quic_conn_protect(c, quic_stream_reset_body, &a);
 }
 
 void
@@ -544,7 +639,7 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
     c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
     writev_flags, send_stream_id, &datav, datavcnt, quic_now());
 
-  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
+  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
     /* The stream's queued data is beyond what the peer's flow control lets
        through right now. Keep it queued and build the packet without it, so
        that ACKs and other frames still go out; the data follows once the
@@ -556,6 +651,11 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
     n = ngtcp2_conn_writev_stream(
       c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
       0, -1, NULL, 0, quic_now());
+  }
+
+  if (!NIL_P(c->pending_exc)) {
+    rb_str_set_len(buffer, 0);
+    quic_conn_raise_pending(c);
   }
 
   if (n < 0) {
@@ -643,6 +743,7 @@ quic_read_pkt_body(VALUE arg)
                                 (const uint8_t *)RSTRING_PTR(a->packet),
                                 (size_t)RSTRING_LEN(a->packet),
                                 quic_now());
+  quic_conn_raise_pending(a->c);
   if (rv != 0) {
     /* NORETURN: longjmp passes through rb_ensure so unlock still fires. */
     quic_conn_raise_error(a->c, rv);
@@ -733,6 +834,7 @@ quic_conn_handle_expiry(VALUE self)
 {
   quic_conn_t *c = quic_conn_get(self);
   int rv = ngtcp2_conn_handle_expiry(c->conn, quic_now());
+  quic_conn_raise_pending(c);
   if (rv != 0) quic_raise_ngtcp2_error(rv);
   return Qnil;
 }

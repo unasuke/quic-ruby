@@ -56,6 +56,11 @@ typedef struct {
      (no dmark needed). GC.compact may relocate owner, so quic_conn_compact
      updates this field via rb_gc_location. */
   VALUE owner;
+  /* An exception raised by Ruby code inside an ngtcp2 callback, caught with
+     rb_protect so that it does not unwind through ngtcp2's frames. #read_pkt,
+     #write_pkt and #handle_expiry re-raise it once ngtcp2 has returned.
+     Qnil when there is none. Marked by quic_conn_data_type's dmark. */
+  VALUE pending_exc;
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
@@ -66,7 +71,8 @@ extern const rb_data_type_t quic_conn_data_type;
 extern ptls_key_exchange_algorithm_t *quic_key_exchanges[];
 extern ptls_cipher_suite_t *quic_cipher_suites[];
 
-/* Allocator for both connection classes. The struct starts zeroed. */
+/* Allocator for both connection classes. The struct starts zeroed, except
+   pending_exc, which starts as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
 
 quic_conn_t *quic_conn_get(VALUE self);

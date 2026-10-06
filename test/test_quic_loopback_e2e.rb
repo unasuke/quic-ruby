@@ -92,6 +92,35 @@ class TestQUICLoopbackE2E < Minitest::Test
     stop_server(server_thread)
   end
 
+  # Ruby code inside an ngtcp2 callback that raises must not unwind through
+  # ngtcp2. With the client's stream registry frozen, stream_open fails when
+  # the server opens a stream, and the FrozenError comes out of read_pkt.
+  def test_callback_exception_is_raised_from_read_pkt
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(server_sock, creds)
+      stream = server.open_bidi_stream
+      stream.write("from the server", fin: true)
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection after its callback failed.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    client.instance_variable_get(:@streams).freeze
+    assert_raises(FrozenError) { client.pump_until { false } }
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
   private
 
   def accept_loopback_server(server_sock, creds)
