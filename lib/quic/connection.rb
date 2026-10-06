@@ -78,6 +78,7 @@ module QUIC
       #
       # Returns a QUIC::Stream, or nil on timeout.
       def accept_stream(timeout: nil)
+        require_stream_mode
         stream = take_accepted_stream
         return stream unless stream.nil?
         return nil if timeout == 0
@@ -101,12 +102,20 @@ module QUIC
       # (IO::WaitReadable mixin) when the queue is empty. Does not require
       # #bind.
       def accept_stream_nonblock
+        require_stream_mode
         stream = take_accepted_stream
         raise QUIC::Error::WaitReadable, "no peer-initiated stream available" if stream.nil?
         stream
       end
 
       private
+
+      # A C stream handler (quic/ext.h) registered on the connection owns
+      # every stream, so no QUIC::Stream is ever queued for #accept_stream.
+      def require_stream_mode
+        return unless @stream_handler
+        raise QUIC::Error::InvalidState, "the connection's streams belong to a C stream handler"
+      end
 
       # The next stream off the accept queue, or nil. Telling the stream it
       # has been accepted lets the peer open another one in place of a

@@ -59,6 +59,12 @@ module QUIC
 
     class NotBound < Error
     end
+
+    # Raised by #open_bidi_stream, #open_uni_stream, #accept_stream and
+    # #accept_stream_nonblock of a connection whose streams belong to a C
+    # stream handler registered through quic/ext.h.
+    class InvalidState < Error
+    end
   end
 
   class TransportParams < Data
@@ -105,7 +111,8 @@ module QUIC
       # Pops the next peer-initiated stream off the accept queue, driving
       # the I/O loop until one arrives. timeout: nil blocks forever
       # (requires #bind), timeout: 0 returns immediately, timeout: Numeric
-      # blocks up to that many seconds. Returns nil on timeout.
+      # blocks up to that many seconds. Returns nil on timeout. Raises
+      # QUIC::Error::InvalidState when a C stream handler owns the streams.
       def accept_stream: (?timeout: Numeric?) -> Stream?
 
       # Non-blocking #accept_stream. Returns the next queued peer-initiated

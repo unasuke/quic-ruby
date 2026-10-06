@@ -21,6 +21,7 @@ VALUE rb_eQUICErrorWaitWritable;
 VALUE rb_eQUICErrorStreamClosed;
 VALUE rb_eQUICErrorStreamReset;
 VALUE rb_eQUICErrorNotBound;
+VALUE rb_eQUICErrorInvalidState;
 
 static VALUE
 quic_library_versions(VALUE self)
@@ -121,6 +122,9 @@ Init_quic(void)
   rb_eQUICErrorStreamClosed = rb_define_class_under(rb_eQUICError, "StreamClosed", rb_eQUICError);
   rb_eQUICErrorStreamReset = rb_define_class_under(rb_eQUICError, "StreamReset", rb_eQUICError);
   rb_eQUICErrorNotBound = rb_define_class_under(rb_eQUICError, "NotBound", rb_eQUICError);
+  /* Raised by the QUIC::Stream methods of a connection whose streams a C
+     stream handler (quic/ext.h) owns. */
+  rb_eQUICErrorInvalidState = rb_define_class_under(rb_eQUICError, "InvalidState", rb_eQUICError);
 
   Init_quic_connection_client(rb_mQUICConnection);
   Init_quic_connection_server(rb_mQUICConnection);

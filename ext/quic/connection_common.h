@@ -2,6 +2,7 @@
 #define QUIC_CONNECTION_COMMON_H 1
 
 #include "quic.h"
+#include "quic/ext.h"
 
 /* Length of the source connection ID this endpoint picks for itself. */
 #define QUIC_SCID_LEN 8
@@ -61,6 +62,17 @@ typedef struct {
      #write_pkt and #handle_expiry re-raise it once ngtcp2 has returned.
      Qnil when there is none. Marked by quic_conn_data_type's dmark. */
   VALUE pending_exc;
+  /* The C stream handler registered through the quic_ext_api table
+     (set_stream_handler), or NULL. With a handler the connection makes no
+     QUIC::Stream objects: every stream callback goes to the handler, and
+     #write_pkt pulls stream data from it. handler_owner is marked while the
+     connection lives. */
+  const quic_ext_stream_handler *handler;
+  void *handler_ud;
+  VALUE handler_owner;
+  /* The time #read_pkt, #write_pkt or #handle_expiry read on entry. Handed
+     to the handler as `ts`, since ngtcp2 callbacks receive no time. */
+  ngtcp2_tstamp now;
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
@@ -72,7 +84,7 @@ extern ptls_key_exchange_algorithm_t *quic_key_exchanges[];
 extern ptls_cipher_suite_t *quic_cipher_suites[];
 
 /* Allocator for both connection classes. The struct starts zeroed, except
-   pending_exc, which starts as Qnil. */
+   pending_exc and handler_owner, which start as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
 
 quic_conn_t *quic_conn_get(VALUE self);
