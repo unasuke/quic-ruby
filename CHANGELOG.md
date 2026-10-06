@@ -10,6 +10,7 @@
 - picotls's `lib/pembase64.c`, a PEM loader nothing uses, is no longer built at install time, so every picotls source compiled into the gem is MIT licensed. ([#10](https://github.com/unasuke/quic-ruby/pull/10))
 
 ### Fixed
+- `QUIC::Stream#read` and `#read_nonblock` give the peer flow control credit back for what they hand to the application. Before, a connection stopped receiving once `initial_max_data` (1 MiB by default) had been used up.
 - `QUIC::Stream#write` and `#write_nonblock` count the bytes already queued but not yet sent against the peer's window, and `#write_pkt` no longer raises `QUIC::Error::FlowControl` when that window is full; the data waits until the peer extends it.
 
 ## [0.0.2] - 2026-09-27

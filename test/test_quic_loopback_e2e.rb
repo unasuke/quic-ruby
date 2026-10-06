@@ -60,7 +60,75 @@ class TestQUICLoopbackE2E < Minitest::Test
     stop_server(server_thread)
   end
 
+  # Three times the default initial_max_data (1 MiB) in each direction.
+  # This only finishes if each end gives the peer credit back as the
+  # application reads.
+  def test_echo_round_trip_past_initial_max_data
+    payload = Random.new(7).bytes(3 * 1024 * 1024)
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(server_sock, creds)
+      stream = server.accept_stream(timeout: 10)
+      raise "no stream accepted within 10 seconds" if stream.nil?
+      write_in_chunks(stream, stream.read)
+      begin
+        server.pump_until { stream.closed? }
+      rescue QUIC::Error::Closed
+        # The client closed the connection before the stream finished.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    stream = client.open_bidi_stream
+    write_in_chunks(stream, payload)
+    assert_equal payload.b, stream.read
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
   private
+
+  def accept_loopback_server(server_sock, creds)
+    server = QUIC::Connection::Server.accept(
+      sock: server_sock,
+      certificate_path: creds.certificate_path,
+      private_key_path: creds.private_key_path,
+      settings: QUIC::Settings.default.with(alpn: ALPN)
+    )
+    server.run
+    server
+  end
+
+  # A Client verifying the test CA, bound to a connected socket, with the
+  # handshake done.
+  def connect_loopback_client(port, creds)
+    client = QUIC::Connection::Client.new(
+      host: "127.0.0.1", port: port, address_family: :inet,
+      settings: QUIC::Settings.default.with(alpn: ALPN, ca_file: creds.ca_file)
+    )
+    sock = UDPSocket.new(Socket::AF_INET)
+    sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)
+    client.bind(sock).run
+    [client, sock]
+  end
+
+  # Stream#write waits until the whole payload fits in the peer's window,
+  # which is smaller than the payloads here, so write them piece by piece.
+  # FIN goes with the last piece.
+  def write_in_chunks(stream, data, chunk_size: 64 * 1024)
+    offset = 0
+    while offset < data.bytesize
+      piece = data.byteslice(offset, chunk_size)
+      offset += piece.bytesize
+      stream.write(piece, fin: offset >= data.bytesize)
+    end
+  end
 
   # The client verifies the server certificate against the test CA, sends
   # payload with FIN, and reads the echo up to the server's FIN. The server

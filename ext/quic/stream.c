@@ -245,6 +245,19 @@ quic_stream_read_nonblock_m(VALUE self, VALUE length_v)
   }
   rb_str_set_len(buffer, have - take);
 
+  /* The application has consumed |take| bytes, so give the peer that much
+     more stream and connection credit. Without this the peer stops sending
+     once initial_max_data / initial_max_stream_data are used up. A stream
+     ngtcp2 has already forgotten is ignored (the call returns 0), but the
+     connection window still grows. Bare Streams have no connection. */
+  VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
+  if (!NIL_P(client_v)) {
+    ngtcp2_conn *conn = quic_conn_ptr(client_v);
+    int rv = ngtcp2_conn_extend_max_stream_offset(conn, s->stream_id, (uint64_t)take);
+    if (rv != 0) quic_raise_ngtcp2_error(rv);
+    ngtcp2_conn_extend_max_offset(conn, (uint64_t)take);
+  }
+
   return out;
 }
 
