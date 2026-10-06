@@ -109,6 +109,12 @@ void quic_require_binary(VALUE str, const char *name);
    ArgumentError for any other type or a path containing NUL. */
 VALUE quic_path_value(VALUE value, const char *name);
 
+/* Copy alpn_ary, an Array of 1-255 byte Strings, into a list and a buffer
+   the list's entries point into. Both are stored in *list and *buf as soon
+   as they are allocated, for the caller to release with xfree even when
+   this raises. An empty Array allocates nothing and sets *count to 0. */
+void quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf);
+
 /* Copy settings.alpn into memory owned by c (c->alpn / c->alpn_buf). An
    empty list leaves c->alpn_count at 0. */
 void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v);

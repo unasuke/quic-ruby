@@ -272,15 +272,14 @@ quic_path_value(VALUE value, const char *name)
   return path;
 }
 
-/* Copy the ALPN list into memory owned by c: picotls keeps the pointers for
-   the whole handshake, so ALLOCA_N would not survive. An empty list leaves
-   c->alpn NULL, which a client sends as no ALPN extension at all. */
+/* picotls keeps the pointers of an ALPN list for the whole handshake, so
+   ALLOCA_N would not survive. */
 void
-quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
+quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf)
 {
-  VALUE alpn_ary = rb_funcall(settings_v, rb_intern("alpn"), 0);
   Check_Type(alpn_ary, T_ARRAY);
   long n_alpn = RARRAY_LEN(alpn_ary);
+  *count = 0;
   if (n_alpn <= 0) return;
 
   size_t total = 0;
@@ -293,17 +292,26 @@ quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
     }
     total += (size_t)len;
   }
-  c->alpn_buf = ALLOC_N(uint8_t, total);
-  c->alpn = ALLOC_N(ptls_iovec_t, n_alpn);
-  uint8_t *p = c->alpn_buf;
+  *buf = ALLOC_N(uint8_t, total);
+  *list = ALLOC_N(ptls_iovec_t, n_alpn);
+  uint8_t *p = *buf;
   for (long i = 0; i < n_alpn; i++) {
     VALUE entry = RARRAY_AREF(alpn_ary, i);
     size_t len = (size_t)RSTRING_LEN(entry);
     memcpy(p, RSTRING_PTR(entry), len);
-    c->alpn[i] = ptls_iovec_init(p, len);
+    (*list)[i] = ptls_iovec_init(p, len);
     p += len;
   }
-  c->alpn_count = (size_t)n_alpn;
+  *count = (size_t)n_alpn;
+}
+
+/* An empty list leaves c->alpn NULL, which a client sends as no ALPN
+   extension at all. */
+void
+quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
+{
+  quic_copy_alpn(rb_funcall(settings_v, rb_intern("alpn"), 0), &c->alpn, &c->alpn_count,
+                 &c->alpn_buf);
 }
 
 /* Shared helper: look up the QUIC::Stream registered for stream_id in the
