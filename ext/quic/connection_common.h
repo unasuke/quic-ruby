@@ -73,6 +73,10 @@ typedef struct {
   /* The time #read_pkt, #write_pkt or #handle_expiry read on entry. Handed
      to the handler as `ts`, since ngtcp2 callbacks receive no time. */
   ngtcp2_tstamp now;
+  /* The application error the handler left with set_application_error, to
+     close the connection with after it reports a failure. */
+  ngtcp2_ccerr close_error;
+  bool close_error_set;
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
@@ -125,5 +129,8 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks);
 
 /* Define the packet I/O, timer, state and stream methods on klass. */
 void quic_conn_define_shared_methods(VALUE klass);
+
+/* The quic_ext_api table (ext_api.c) that quic_ext_get_api hands out. */
+extern const quic_ext_api quic_ext_api_table;
 
 #endif /* QUIC_CONNECTION_COMMON_H */

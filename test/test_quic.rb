@@ -23,6 +23,21 @@ class TestQUIC < Minitest::Test
     assert_match(/\A[0-9a-f]{40}\z/, QUIC.library_versions[:picotls])
   end
 
+  # The statically linked ngtcp2 and picotls stay hidden. Besides the Init
+  # function Ruby calls, quic.so exports only the entry point of the C
+  # function table other extensions use (quic/ext.h).
+  def test_exports_only_init_and_ext_api
+    skip "checked with GNU nm on Linux only" unless RUBY_PLATFORM.include?("linux")
+    so = $LOADED_FEATURES.find { |path| path.end_with?("/quic/quic.so") }
+    begin
+      output = IO.popen(["nm", "-D", "--defined-only", so], err: File::NULL, &:read)
+    rescue Errno::ENOENT
+      skip "nm is not installed"
+    end
+    symbols = output.lines.map { |line| line.split.last }
+    assert_equal %w[Init_quic quic_ext_get_api], symbols.sort
+  end
+
   def test_ext_include_dir_holds_the_header
     assert File.file?(File.join(QUIC::EXT_INCLUDE_DIR, "quic", "ext.h"))
   end

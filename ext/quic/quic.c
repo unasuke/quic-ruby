@@ -1,5 +1,6 @@
 #include "quic.h"
 #include "stream.h"
+#include "connection_common.h"
 
 VALUE rb_mQUIC;
 VALUE rb_mQUICConnection;
@@ -22,6 +23,16 @@ VALUE rb_eQUICErrorStreamClosed;
 VALUE rb_eQUICErrorStreamReset;
 VALUE rb_eQUICErrorNotBound;
 VALUE rb_eQUICErrorInvalidState;
+
+/* The one symbol besides Init_quic that quic.so exports: other extensions
+   look it up with rb_ext_resolve_symbol("quic/quic", "quic_ext_get_api")
+   and get the C function table declared in quic/ext.h. NULL means the
+   caller was built against an incompatible major version. */
+RUBY_FUNC_EXPORTED const quic_ext_api *
+quic_ext_get_api(uint32_t abi_major)
+{
+  return abi_major == QUIC_EXT_ABI_MAJOR ? &quic_ext_api_table : NULL;
+}
 
 static VALUE
 quic_library_versions(VALUE self)
