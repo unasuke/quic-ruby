@@ -10,8 +10,8 @@ require "socket"
 require "tmpdir"
 
 # A Server in a thread and a Client in the main thread, talking over UDP on
-# 127.0.0.1. Pumping both ends from one thread would deadlock. ALPN is the
-# including test class's ALPN constant.
+# 127.0.0.1. Pumping both ends from one thread would deadlock. ALPN defaults
+# to the including test class's ALPN constant.
 module TestLoopback
   JOIN_TIMEOUT = 15
 
@@ -47,25 +47,24 @@ module TestLoopback
     nil
   end
 
-  # Accept the first client on server_sock and complete the handshake.
-  def accept_loopback_server(server_sock, creds, transport_params: nil)
-    server = QUIC::Connection::Server.accept(
+  # Accept the first client on server_sock. The handshake is left to the
+  # caller, so that it can attach a stream handler before any stream exists.
+  def accept_loopback_server(server_sock, creds, alpn: self.class::ALPN, transport_params: nil)
+    QUIC::Connection::Server.accept(
       sock: server_sock,
       certificate_path: creds.certificate_path,
       private_key_path: creds.private_key_path,
       transport_params: transport_params,
-      settings: QUIC::Settings.default.with(alpn: self.class::ALPN)
+      settings: QUIC::Settings.default.with(alpn: alpn)
     )
-    server.run
-    server
   end
 
   # A Client verifying the test CA, bound to a connected socket, with the
   # handshake done.
-  def connect_loopback_client(port, creds)
+  def connect_loopback_client(port, creds, alpn: self.class::ALPN)
     client = QUIC::Connection::Client.new(
       host: "127.0.0.1", port: port, address_family: :inet,
-      settings: QUIC::Settings.default.with(alpn: self.class::ALPN, ca_file: creds.ca_file)
+      settings: QUIC::Settings.default.with(alpn: alpn, ca_file: creds.ca_file)
     )
     sock = UDPSocket.new(Socket::AF_INET)
     sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)

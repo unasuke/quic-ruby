@@ -69,6 +69,7 @@ class TestQUICLoopbackE2E < Minitest::Test
     server_sock, port = bind_server_socket
     server_thread = start_server_thread do
       server = accept_loopback_server(server_sock, creds)
+      server.run
       stream = server.accept_stream(timeout: 10)
       raise "no stream accepted within 10 seconds" if stream.nil?
       write_in_chunks(stream, stream.read)
@@ -103,6 +104,7 @@ class TestQUICLoopbackE2E < Minitest::Test
         server_sock, creds,
         transport_params: QUIC::TransportParams.default.with(initial_max_streams_bidi: 4)
       )
+      server.run
       10.times do
         stream = server.accept_stream(timeout: 10)
         raise "no stream accepted within 10 seconds" if stream.nil?
@@ -185,6 +187,7 @@ class TestQUICLoopbackE2E < Minitest::Test
     server_sock, port = bind_server_socket
     server_thread = start_server_thread do
       server = accept_loopback_server(server_sock, creds)
+      server.run
       stream = server.open_bidi_stream
       stream.write("from the server", fin: true)
       begin
