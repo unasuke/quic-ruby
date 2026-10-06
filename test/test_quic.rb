@@ -23,6 +23,10 @@ class TestQUIC < Minitest::Test
     assert_match(/\A[0-9a-f]{40}\z/, QUIC.library_versions[:picotls])
   end
 
+  def test_ext_include_dir_holds_the_header
+    assert File.file?(File.join(QUIC::EXT_INCLUDE_DIR, "quic", "ext.h"))
+  end
+
   def test_transport_params_default_returns_data_instance
     tp = QUIC::TransportParams.default
     assert_kind_of QUIC::TransportParams, tp

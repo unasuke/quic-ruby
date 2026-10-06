@@ -1,6 +1,10 @@
 module QUIC
   VERSION: String
 
+  # The directory holding quic/ext.h, the C function table other native
+  # extensions build against. Defined without loading the extension.
+  EXT_INCLUDE_DIR: String
+
   def self.library_versions: () -> { ngtcp2: String, openssl: String, picotls: String }
 
   class Error < StandardError
