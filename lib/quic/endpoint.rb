@@ -22,6 +22,9 @@ module QUIC
   # The socket must not be connected, and must be bound to the address it
   # serves (not 0.0.0.0): every path's local address is local_address.
   #
+  # The Endpoint's own answers wait for #write_pkt in a queue of at most
+  # 1024; any beyond are dropped, so call #write_pkt often under load.
+  #
   # A connection's failure never raises from the Endpoint's methods. It
   # closes that connection alone, and Connection#error tells why. The
   # connections have no socket, so only their non-blocking methods work;

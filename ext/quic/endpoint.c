@@ -12,6 +12,12 @@
 /* Length of the secret Stateless Reset tokens are derived from. */
 #define QUIC_STATELESS_RESET_SECRETLEN 32
 
+/* How many of the Endpoint's own answers may wait for #write_pkt. Any
+   datagram can prompt one, so without a limit a flood read faster than it
+   is answered would take memory without bound. Every one of them may be
+   lost on the wire anyway, so those beyond are dropped. */
+#define QUIC_ENDPOINT_MAX_RESPONSES 1024
+
 VALUE rb_cQUICEndpoint;
 
 /* Many server connections on one UDP socket. The Endpoint routes each
@@ -211,10 +217,14 @@ quic_addr_str(const ngtcp2_addr *addr)
   return rb_str_new((const char *)addr->addr, (long)addr->addrlen);
 }
 
-static void
+/* Queue an answer for #write_pkt. Returns false when the queue is full and
+   the answer was dropped. */
+static bool
 quic_endpoint_push_response(quic_endpoint_t *ep, VALUE pkt, VALUE to)
 {
+  if (RARRAY_LEN(ep->responses) >= QUIC_ENDPOINT_MAX_RESPONSES) return false;
   rb_ary_push(ep->responses, rb_assoc_new(pkt, to));
+  return true;
 }
 
 static void
@@ -360,7 +370,7 @@ quic_endpoint_resend_close(quic_endpoint_t *ep, quic_conn_t *c, size_t pktlen, V
       c->close_bytes_recv * 3 < c->close_bytes_sent + len) {
     return;
   }
-  quic_endpoint_push_response(ep, rb_str_dup(c->closebuf), rb_str_dup(remote));
+  if (!quic_endpoint_push_response(ep, rb_str_dup(c->closebuf), rb_str_dup(remote))) return;
   c->close_bytes_sent += len;
   c->close_next_pkts_recv *= 2;
 }

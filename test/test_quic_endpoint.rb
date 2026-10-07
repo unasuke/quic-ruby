@@ -180,6 +180,21 @@ class TestQUICEndpoint < Minitest::Test
     assert_nil endpoint.read_pkt("\x40".b, remote: Addrinfo.udp("::1", 50_000).to_sockaddr)
   end
 
+  # The Endpoint's own answers wait for #write_pkt in a queue of bounded
+  # length, so a flood read faster than it is answered loses the excess
+  # instead of taking memory without bound.
+  def test_drops_answers_beyond_the_queue_limit
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    packet = client.write_pkt
+    packet[1, 4] = [0x1a2a3a4a].pack("N")
+    1100.times { assert_nil net.endpoint.read_pkt(packet, remote: net.address_of(client)) }
+
+    answers = 0
+    answers += 1 while net.endpoint.write_pkt
+    assert_equal 1024, answers
+  end
+
   def test_endpoint_drops_what_it_cannot_parse
     endpoint = endpoint_network(tls_context).endpoint
     remote = Addrinfo.udp("127.0.0.1", 50_000).to_sockaddr

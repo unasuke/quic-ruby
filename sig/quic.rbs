@@ -274,8 +274,8 @@ module QUIC
     def read_pkt: (String packet, remote: String, ?local: String?) -> Connection::Server?
 
     # The next datagram to send and its destination sockaddr, or nil when
-    # there is none left: the Endpoint's own answers first, then each
-    # connection's packets in turn.
+    # there is none left: the Endpoint's own answers first (at most 1024
+    # wait; any beyond are dropped), then each connection's packets in turn.
     def write_pkt: () -> [String, String]?
 
     # The earliest CLOCK_MONOTONIC time (ns) #handle_expiry is due, or nil.
