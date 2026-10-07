@@ -8,6 +8,10 @@
 /* Length of the source connection ID this endpoint picks for itself. */
 #define QUIC_SCID_LEN 8
 
+/* Buffer size for #write_pkt. NGTCP2_MAX_UDP_PAYLOAD_SIZE (1200) is the
+   minimum destlen ngtcp2 accepts. Revisit when PMTUD is enabled (Phase 4+). */
+#define QUIC_WRITE_PKT_BUFLEN NGTCP2_MAX_UDP_PAYLOAD_SIZE
+
 /* The C side of a QUIC::Connection::Client or QUIC::Connection::Server. Both
    classes wrap it with quic_conn_data_type, so stream.c can reach the
    ngtcp2_conn of either through quic_conn_ptr. Only the constructors
@@ -87,6 +91,23 @@ extern ptls_cipher_suite_t *quic_cipher_suites[];
 /* Allocator for both connection classes. The struct starts zeroed, except
    pending_exc and handler_owner, which start as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
+
+/* CLOCK_MONOTONIC in ngtcp2's units (nanoseconds). */
+ngtcp2_tstamp quic_now(void);
+
+/* Build the next packet of the connection self (wrapping c) into dest of
+   QUIC_WRITE_PKT_BUFLEN bytes, as #write_pkt does, and store its path in
+   *path. Returns the packet's length, 0 when there is nothing to send, or a
+   negative ngtcp2 error. Never raises for the connection's own failures: an
+   exception from a Ruby callback is left in c->pending_exc. */
+ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path,
+                                     uint8_t *dest);
+
+/* Feed one datagram to the connection, as #read_pkt does, and return what
+   ngtcp2_conn_read_pkt returned. Like quic_conn_write_pkt_raw, it leaves an
+   exception from a Ruby callback in c->pending_exc. */
+int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
+                           size_t datalen);
 
 /* The exception #read_pkt raises for rv, an error ngtcp2_conn_read_pkt
    returned: a CryptoError (or CertificateVerifyFailed) with the TLS alert

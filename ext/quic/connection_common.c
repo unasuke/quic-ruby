@@ -8,10 +8,6 @@
 
 #include <openssl/rand.h>
 
-/* Buffer size for #write_pkt. NGTCP2_MAX_UDP_PAYLOAD_SIZE (1200) is the
-   minimum destlen ngtcp2 accepts. Revisit when PMTUD is enabled (Phase 4+). */
-#define QUIC_WRITE_PKT_BUFLEN NGTCP2_MAX_UDP_PAYLOAD_SIZE
-
 /* picotls sends a key share only for the first entry; the others are offered
    in supported_groups and reached via HelloRetryRequest. X25519 is first so
    the common case stays 1-RTT. */
@@ -139,7 +135,7 @@ quic_conn_ptr(VALUE owner)
   return quic_conn_get(owner)->conn;
 }
 
-static ngtcp2_tstamp
+ngtcp2_tstamp
 quic_now(void)
 {
   struct timespec ts;
@@ -834,6 +830,18 @@ quic_conn_write_pkt_handler(quic_conn_t *c, ngtcp2_path *path, ngtcp2_pkt_info *
   }
 }
 
+ngtcp2_ssize
+quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path, uint8_t *dest)
+{
+  ngtcp2_pkt_info pi;
+  memset(&pi, 0, sizeof(pi));
+
+  c->now = quic_now();
+  return c->handler
+    ? quic_conn_write_pkt_handler(c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN)
+    : quic_conn_write_pkt_streams(self, c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN);
+}
+
 static VALUE
 quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
 {
@@ -859,16 +867,8 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   ngtcp2_path_storage path_storage;
   ngtcp2_path_storage_zero(&path_storage);
 
-  ngtcp2_pkt_info pi;
-  memset(&pi, 0, sizeof(pi));
-
-  uint8_t *dest = (uint8_t *)RSTRING_PTR(buffer);
-  size_t destlen = (size_t)QUIC_WRITE_PKT_BUFLEN;
-
-  c->now = quic_now();
-  ngtcp2_ssize n = c->handler
-    ? quic_conn_write_pkt_handler(c, &path_storage.path, &pi, dest, destlen)
-    : quic_conn_write_pkt_streams(self, c, &path_storage.path, &pi, dest, destlen);
+  ngtcp2_ssize n =
+    quic_conn_write_pkt_raw(self, c, &path_storage.path, (uint8_t *)RSTRING_PTR(buffer));
 
   if (!NIL_P(c->pending_exc)) {
     rb_str_set_len(buffer, 0);
@@ -919,22 +919,29 @@ quic_conn_error_new(quic_conn_t *c, int rv)
   return exc;
 }
 
+int
+quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
+                       size_t datalen)
+{
+  ngtcp2_pkt_info pi;
+  memset(&pi, 0, sizeof(pi));
+
+  c->now = quic_now();
+  return ngtcp2_conn_read_pkt(c->conn, path, &pi, data, datalen, c->now);
+}
+
 struct quic_read_pkt_args {
   quic_conn_t *c;
   VALUE packet;
   ngtcp2_path path;
-  ngtcp2_pkt_info pi;
 };
 
 static VALUE
 quic_read_pkt_body(VALUE arg)
 {
   struct quic_read_pkt_args *a = (struct quic_read_pkt_args *)arg;
-  a->c->now = quic_now();
-  int rv = ngtcp2_conn_read_pkt(a->c->conn, &a->path, &a->pi,
-                                (const uint8_t *)RSTRING_PTR(a->packet),
-                                (size_t)RSTRING_LEN(a->packet),
-                                a->c->now);
+  int rv = quic_conn_read_pkt_raw(a->c, &a->path, (const uint8_t *)RSTRING_PTR(a->packet),
+                                  (size_t)RSTRING_LEN(a->packet));
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
     /* longjmp passes through rb_ensure so unlock still fires. */
@@ -982,7 +989,6 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
   args.path.remote.addr    = (struct sockaddr *)RSTRING_PTR(remote_sockaddr);
   args.path.remote.addrlen = (ngtcp2_socklen)RSTRING_LEN(remote_sockaddr);
   args.path.user_data      = NULL;
-  memset(&args.pi, 0, sizeof(args.pi));
 
   rb_str_locktmp(packet);
   return rb_ensure(quic_read_pkt_body, (VALUE)&args,
