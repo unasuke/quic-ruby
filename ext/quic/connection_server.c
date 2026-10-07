@@ -1,4 +1,5 @@
 #include "connection_common.h"
+#include "endpoint.h"
 
 #include <openssl/rand.h>
 
@@ -14,12 +15,20 @@ quic_server_raise_unacceptable(void)
 
 VALUE
 quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *path,
-                     VALUE tls_context, VALUE transport_params, VALUE settings_v)
+                     VALUE tls_context, VALUE transport_params, VALUE settings_v,
+                     quic_endpoint_t *ep, VALUE ep_owner)
 {
   VALUE self = quic_conn_alloc(klass);
   quic_conn_t *c = quic_conn_get(self);
   c->owner = self;
   c->is_server = true;
+  /* Set before ngtcp2_conn_server_new, whose callbacks may already look for
+     the Endpoint. */
+  if (ep != NULL) {
+    c->from_endpoint = true;
+    c->endpoint = ep;
+    c->endpoint_owner = ep_owner;
+  }
 
   /* The reference taken here keeps the context alive until quic_conn_free,
      whatever happens to the QUIC::TLSContext object. */
@@ -154,7 +163,8 @@ quic_server_accept(int argc, VALUE *argv, VALUE klass)
     NULL,
   };
 
-  return quic_server_conn_new(klass, &hd, &path, tls_context, transport_params, settings_v);
+  return quic_server_conn_new(klass, &hd, &path, tls_context, transport_params, settings_v,
+                              NULL, Qnil);
 }
 
 void

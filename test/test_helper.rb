@@ -85,6 +85,160 @@ module TestLoopback
   end
 end
 
+# A QUIC::Endpoint and any number of Clients, joined by datagrams handed over
+# in memory instead of sockets, all in one thread. Each Client gets an
+# address of its own, which is all the Endpoint tells them apart by. A test
+# can drop what the Endpoint sends, and sees what each Client raised.
+module TestEndpointNetwork
+  def endpoint_network(tls_context, **endpoint_options)
+    Network.new(
+      QUIC::Endpoint.new(local_address: Network::SERVER_ADDRESS, tls_context: tls_context, **endpoint_options)
+    )
+  end
+
+  # The server side of an echo over QUIC::Stream: send back whatever a
+  # client stream carried, once it has ended. state carries the partial
+  # reads from one call to the next.
+  def echo_streams(endpoint, state)
+    endpoint.connections.each do |conn|
+      loop { state[conn.accept_stream_nonblock] = +"" }
+    rescue QUIC::Error::WaitReadable
+      next
+    end
+    state.each do |stream, received|
+      next if received.frozen?
+
+      loop { received << stream.read_nonblock(65_536) }
+    rescue QUIC::Error::WaitReadable
+      next
+    rescue EOFError
+      stream.write_nonblock(received, fin: true)
+      received.freeze
+    end
+  end
+
+  # All a stream carried, or nil until it has ended. buffer collects the
+  # partial reads.
+  def read_to_end(stream, buffer)
+    loop { buffer << stream.read_nonblock(65_536) }
+  rescue QUIC::Error::WaitReadable
+    nil
+  rescue EOFError
+    buffer
+  end
+
+  class Network
+    SERVER_ADDRESS = Addrinfo.udp("127.0.0.1", 4433)
+    # Client.new makes 0.0.0.0:0 the local address of its path.
+    CLIENT_LOCAL_SOCKADDR = Addrinfo.udp("0.0.0.0", 0).to_sockaddr
+    TIMEOUT = 10
+
+    attr_reader :endpoint
+    # Called with each packet the Endpoint sends and the Client it is for;
+    # true drops the packet.
+    attr_accessor :drop
+
+    def initialize(endpoint)
+      @endpoint = endpoint
+      @clients = {}
+      @errors = {}
+      @next_port = 50_000
+    end
+
+    # A new Client of the Endpoint, verifying ca_file. The handshake is left
+    # to #run_until.
+    def connect(alpn:, ca_file:)
+      client = QUIC::Connection::Client.new(
+        host: SERVER_ADDRESS.ip_address, port: SERVER_ADDRESS.ip_port,
+        settings: QUIC::Settings.default.with(alpn: alpn, ca_file: ca_file)
+      )
+      @next_port += 1
+      @clients[Addrinfo.udp("127.0.0.1", @next_port).to_sockaddr] = client
+      client
+    end
+
+    # The sockaddr the Endpoint knows client by.
+    def address_of(client)
+      @clients.key(client)
+    end
+
+    # What client raised from #read_pkt, #write_pkt or #handle_expiry. The
+    # network stops driving a client once it has raised.
+    def error_of(client)
+      @errors[client]
+    end
+
+    # Hand every waiting packet over once in each direction, then run the
+    # timers that are due. Returns how many packets moved.
+    def step
+      moved = 0
+      live_clients.each do |addr, client|
+        guard(client) do
+          while (pkt = client.write_pkt)
+            moved += 1
+            @endpoint.read_pkt(pkt, remote: addr)
+          end
+        end
+      end
+      while (pkt, to = @endpoint.write_pkt)
+        moved += 1
+        client = @clients[to]
+        next if client.nil? || @errors.key?(client) || drop&.call(pkt, client)
+
+        guard(client) do
+          client.read_pkt(pkt, local_sockaddr: CLIENT_LOCAL_SOCKADDR, remote_sockaddr: SERVER_ADDRESS.to_sockaddr)
+        end
+      end
+      run_timers
+      moved
+    end
+
+    # #step until the block returns true, sleeping until the next timer
+    # whenever nothing moved.
+    def run_until(timeout: TIMEOUT)
+      deadline = now + timeout * 1_000_000_000
+      until yield
+        raise "timed out (client errors: #{@errors.values.inspect})" if now > deadline
+
+        sleep(idle_wait) if step.zero?
+      end
+    end
+
+    private
+
+    def live_clients
+      @clients.reject { |_, client| @errors.key?(client) }
+    end
+
+    def guard(client)
+      yield
+    rescue QUIC::Error => e
+      @errors[client] = e
+    end
+
+    def run_timers
+      t = now
+      live_clients.each_value do |client|
+        guard(client) { client.handle_expiry if (expiry = client.expiry) && expiry <= t }
+      end
+      @endpoint.handle_expiry if (expiry = @endpoint.expiry) && expiry <= t
+    end
+
+    # Until the next timer, but no more than 10 ms, so that the condition
+    # given to #run_until is looked at often.
+    def idle_wait
+      timers = [@endpoint.expiry, *live_clients.values.map(&:expiry)].compact
+      return 0.01 if timers.empty?
+
+      ((timers.min - now) / 1e9).clamp(0.0, 0.01)
+    end
+
+    def now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+    end
+  end
+end
+
 module TestCertificates
   LoopbackCredentials = Data.define(:ca_file, :certificate_path, :private_key_path)
 

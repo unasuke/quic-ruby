@@ -146,5 +146,6 @@ Init_quic(void)
   Init_quic_tls_context(rb_mQUIC);
   Init_quic_connection_client(rb_mQUICConnection);
   Init_quic_connection_server(rb_mQUICConnection);
+  Init_quic_endpoint(rb_mQUIC);
   Init_quic_stream(rb_mQUIC);
 }

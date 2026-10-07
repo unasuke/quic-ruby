@@ -1,4 +1,5 @@
 #include "connection_common.h"
+#include "endpoint.h"
 #include "stream.h"
 
 #include <netinet/in.h>
@@ -33,6 +34,9 @@ static void
 quic_conn_free(void *ptr)
 {
   quic_conn_t *c = (quic_conn_t *)ptr;
+  /* The Endpoint may be swept in the same GC cycle and freed first; nothing
+     from here on may reach its CID table. */
+  c->endpoint = NULL;
   if (c->conn) ngtcp2_conn_del(c->conn);
   if (c->cptls.ptls) {
     /* Safe even when configure_client_session never ran or failed midway. */
@@ -62,6 +66,9 @@ quic_conn_mark(void *ptr)
   quic_conn_t *c = (quic_conn_t *)ptr;
   rb_gc_mark_movable(c->pending_exc);
   rb_gc_mark_movable(c->handler_owner);
+  rb_gc_mark_movable(c->endpoint_owner);
+  rb_gc_mark_movable(c->error);
+  rb_gc_mark_movable(c->closebuf);
 }
 
 /* GC.compact may relocate the owner connection object. Follow it so the
@@ -75,6 +82,9 @@ quic_conn_compact(void *ptr)
   c->owner = rb_gc_location(c->owner);
   c->pending_exc = rb_gc_location(c->pending_exc);
   c->handler_owner = rb_gc_location(c->handler_owner);
+  c->endpoint_owner = rb_gc_location(c->endpoint_owner);
+  c->error = rb_gc_location(c->error);
+  c->closebuf = rb_gc_location(c->closebuf);
 }
 
 const rb_data_type_t quic_conn_data_type = {
@@ -91,6 +101,9 @@ quic_conn_alloc(VALUE klass)
   memset(c, 0, sizeof(*c));
   c->pending_exc = Qnil;
   c->handler_owner = Qnil;
+  c->endpoint_owner = Qnil;
+  c->error = Qnil;
+  c->closebuf = Qnil;
   return TypedData_Wrap_Struct(klass, &quic_conn_data_type, c);
 }
 
@@ -150,13 +163,14 @@ quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
   RAND_bytes(dest, (int)destlen);
 }
 
+/* A connection an Endpoint holds enters the new CID in its table. */
 static int
 quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
                               ngtcp2_stateless_reset_token *token, size_t cidlen,
                               void *user_data)
 {
   (void)conn;
-  (void)user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
   if (RAND_bytes(cid->data, (int)cidlen) != 1) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
@@ -164,6 +178,16 @@ quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
   if (RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
+  if (c->endpoint != NULL) quic_endpoint_associate_cid(c->endpoint, cid, c->owner);
+  return 0;
+}
+
+static int
+quic_remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid, void *user_data)
+{
+  (void)conn;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->endpoint != NULL) quic_endpoint_dissociate_cid(c->endpoint, cid, c->owner);
   return 0;
 }
 
@@ -641,6 +665,7 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
   callbacks->version_negotiation = ngtcp2_crypto_version_negotiation_cb;
   callbacks->rand = quic_rand_cb;
   callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
+  callbacks->remove_connection_id = quic_remove_connection_id_cb;
   callbacks->stream_open = quic_stream_open_cb;
   callbacks->recv_stream_data = quic_recv_stream_data_cb;
   callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
@@ -1117,6 +1142,18 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
     return Qnil;
   }
 
+  /* A connection an Endpoint made has no socket: the CONNECTION_CLOSE goes
+     out through Endpoint#write_pkt. Once it has left the Endpoint's table
+     it is finished, and #close does nothing. */
+  if (c->from_endpoint) {
+    if (c->endpoint == NULL) return Qnil;
+    ngtcp2_ccerr ccerr;
+    ngtcp2_ccerr_set_application_error(&ccerr, error_code, reason_len > 0 ? reason_ptr : NULL,
+                                       reason_len);
+    quic_endpoint_close_conn(c->endpoint, c, &ccerr);
+    return Qnil;
+  }
+
   VALUE sock = rb_ivar_get(self, rb_intern("@sock"));
   if (NIL_P(sock)) {
     rb_raise(rb_eQUICErrorNotBound, "%"PRIsVALUE"#bind(sock) has not been called",
@@ -1162,6 +1199,14 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
   return Qnil;
 }
 
+/* Why an Endpoint closed this connection; see quic_conn_t.error. Always nil
+   for a connection no Endpoint made. */
+static VALUE
+quic_conn_error_m(VALUE self)
+{
+  return quic_conn_get(self)->error;
+}
+
 void
 quic_conn_define_shared_methods(VALUE klass)
 {
@@ -1175,4 +1220,5 @@ quic_conn_define_shared_methods(VALUE klass)
   rb_define_method(klass, "open_bidi_stream", quic_conn_open_bidi_stream, 0);
   rb_define_method(klass, "open_uni_stream", quic_conn_open_uni_stream, 0);
   rb_define_method(klass, "close", quic_conn_close_m, -1);
+  rb_define_method(klass, "error", quic_conn_error_m, 0);
 }
