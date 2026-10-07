@@ -11,7 +11,8 @@ module QUIC
     :alpn,
     :verify_mode,
     :ca_file,
-    :ca_path
+    :ca_path,
+    :qlog_dir
   )
 
   class Settings
@@ -28,7 +29,12 @@ module QUIC
     #
     # Only a client uses verify_mode, ca_file and ca_path. A server ignores
     # them, since it does not ask for a client certificate.
-    def initialize(verify_mode: :peer, ca_file: nil, ca_path: nil, **rest)
+    #
+    # qlog_dir (a String or Pathname) makes every connection write its qlog
+    # to <qlog_dir>/<its first source connection ID in hex>.sqlog. A file
+    # that cannot be opened when a connection is made only costs that
+    # connection's qlog.
+    def initialize(verify_mode: :peer, ca_file: nil, ca_path: nil, qlog_dir: nil, **rest)
       super
     end
 
@@ -43,7 +49,8 @@ module QUIC
         alpn: [],
         verify_mode: :peer,
         ca_file: nil,
-        ca_path: nil
+        ca_path: nil,
+        qlog_dir: nil
       )
     end
   end

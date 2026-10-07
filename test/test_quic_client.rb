@@ -89,6 +89,14 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  def test_new_opens_a_qlog_file_named_after_its_scid
+    Dir.mktmpdir do |dir|
+      QUIC::Connection::Client.new(host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: dir))
+      assert_equal 1, Dir.children(dir).size
+      assert_match(/\A\h{16}\.sqlog\z/, Dir.children(dir).first)
+    end
+  end
+
   # ngtcp2 copies an address by its length into room for a sockaddr_in6, so
   # only an AF_INET or AF_INET6 sockaddr of its exact size may get through.
   def test_read_pkt_raises_on_anything_but_an_inet_sockaddr

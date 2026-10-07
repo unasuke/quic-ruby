@@ -195,6 +195,35 @@ class TestQUICEndpoint < Minitest::Test
     assert_equal 1024, answers
   end
 
+  def test_qlog_dir_gets_a_file_per_connection
+    Dir.mktmpdir do |dir|
+      net = endpoint_network(tls_context, settings: QUIC::Settings.default.with(qlog_dir: dir))
+      a = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+      b = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+      net.run_until { a.handshake_completed? && b.handshake_completed? }
+
+      files = Dir.children(dir)
+      assert_equal 2, files.size
+      files.each { |name| assert_match(/\A\h{16}\.sqlog\z/, name) }
+    end
+  end
+
+  # A qlog file that cannot be opened when a connection is made costs that
+  # connection its qlog, nothing more.
+  def test_connection_goes_on_without_its_qlog_file
+    Dir.mktmpdir do |dir|
+      qlog_dir = File.join(dir, "qlog")
+      Dir.mkdir(qlog_dir)
+      net = endpoint_network(tls_context, settings: QUIC::Settings.default.with(qlog_dir: qlog_dir))
+      Dir.rmdir(qlog_dir)
+
+      client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+      net.run_until { client.handshake_completed? }
+      assert_equal 1, net.endpoint.connections.size
+      refute Dir.exist?(qlog_dir)
+    end
+  end
+
   def test_endpoint_drops_what_it_cannot_parse
     endpoint = endpoint_network(tls_context).endpoint
     remote = Addrinfo.udp("127.0.0.1", 50_000).to_sockaddr
