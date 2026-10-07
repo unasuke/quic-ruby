@@ -101,6 +101,12 @@ ngtcp2_conn *quic_conn_get_conn(ngtcp2_crypto_conn_ref *conn_ref);
 
 void quic_require_binary(VALUE str, const char *name);
 
+/* str must be a binary String holding an AF_INET or AF_INET6 sockaddr of
+   exactly that family's size, as Addrinfo#to_sockaddr makes. ngtcp2 copies
+   an address by its length into storage only as large as sockaddr_in6, so
+   anything longer would overrun it. Raises ArgumentError otherwise. */
+void quic_require_sockaddr(VALUE str, const char *name);
+
 /* Validate a path argument and return it as a String, or Qnil for nil.
    Accepts a String or anything responding to #to_path, and raises
    ArgumentError for any other type or a path containing NUL. */

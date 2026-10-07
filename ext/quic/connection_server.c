@@ -43,8 +43,8 @@ quic_server_accept(int argc, VALUE *argv, VALUE klass)
   }
 
   quic_require_binary(initial_packet,  "initial_packet");
-  quic_require_binary(local_sockaddr,  "local_sockaddr");
-  quic_require_binary(remote_sockaddr, "remote_sockaddr");
+  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
   certificate_path = quic_path_value(certificate_path, "certificate_path");
   private_key_path = quic_path_value(private_key_path, "private_key_path");
 

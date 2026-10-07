@@ -186,6 +186,23 @@ quic_require_binary(VALUE str, const char *name)
   }
 }
 
+void
+quic_require_sockaddr(VALUE str, const char *name)
+{
+  quic_require_binary(str, name);
+
+  long len = RSTRING_LEN(str);
+  sa_family_t family = AF_UNSPEC;
+  if (len >= (long)(offsetof(struct sockaddr, sa_family) + sizeof(family))) {
+    memcpy(&family, RSTRING_PTR(str) + offsetof(struct sockaddr, sa_family), sizeof(family));
+  }
+  if ((family == AF_INET && len == (long)sizeof(struct sockaddr_in)) ||
+      (family == AF_INET6 && len == (long)sizeof(struct sockaddr_in6))) {
+    return;
+  }
+  rb_raise(rb_eArgError, "%s must be an AF_INET or AF_INET6 sockaddr (Addrinfo#to_sockaddr)", name);
+}
+
 static uint64_t
 quic_get_uint64_field(VALUE obj, const char *name)
 {
@@ -954,8 +971,8 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
   }
 
   quic_require_binary(packet,          "packet");
-  quic_require_binary(local_sockaddr,  "local_sockaddr");
-  quic_require_binary(remote_sockaddr, "remote_sockaddr");
+  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
 
   quic_conn_t *c = quic_conn_get(self);
 
