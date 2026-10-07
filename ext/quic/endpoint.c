@@ -7,8 +7,9 @@
 VALUE rb_cQUICEndpoint;
 
 /* Many server connections on one UDP socket. The Endpoint routes each
-   datagram by its DCID; the I/O loop stays with the caller. Dispatch
-   follows Server::read_pkt in ngtcp2's examples/server.cc. */
+   datagram by its DCID and answers what no connection can (Version
+   Negotiation); the I/O loop stays with the caller. Dispatch follows
+   Server::read_pkt in ngtcp2's examples/server.cc. */
 struct quic_endpoint {
   /* CID -> the Connection::Server it routes to. A connection is entered
      under the client's first DCID and every SCID it issues. Keys are
@@ -196,6 +197,30 @@ quic_conn_set_error(quic_conn_t *c, VALUE exc)
 {
   /* The first failure is the reason; what follows is its consequence. */
   if (NIL_P(c->error)) c->error = exc;
+}
+
+static void
+quic_endpoint_send_version_negotiation(quic_endpoint_t *ep, const ngtcp2_version_cid *vc,
+                                       VALUE remote)
+{
+  uint8_t unused_bits;
+  uint32_t grease;
+  if (RAND_bytes(&unused_bits, 1) != 1 ||
+      RAND_bytes((uint8_t *)&grease, sizeof(grease)) != 1) {
+    return;
+  }
+  /* A reserved version (0x?a?a?a?a) ahead of the one supported, so that
+     clients keep handling versions they do not know (RFC 9000 section
+     6.3). */
+  uint32_t versions[] = {(grease & 0xf0f0f0f0U) | 0x0a0a0a0aU, NGTCP2_PROTO_VER_V1};
+
+  VALUE pkt = rb_str_buf_new(NGTCP2_MAX_UDP_PAYLOAD_SIZE);
+  ngtcp2_ssize n = ngtcp2_pkt_write_version_negotiation(
+    (uint8_t *)RSTRING_PTR(pkt), NGTCP2_MAX_UDP_PAYLOAD_SIZE, unused_bits, vc->scid, vc->scidlen,
+    vc->dcid, vc->dcidlen, versions, sizeof(versions) / sizeof(versions[0]));
+  if (n <= 0) return;
+  rb_str_set_len(pkt, n);
+  quic_endpoint_push_response(ep, pkt, rb_str_dup(remote));
 }
 
 /* The closing and draining periods last three PTOs (RFC 9000 section
@@ -462,6 +487,10 @@ quic_endpoint_read_pkt_body(VALUE arg)
 
   ngtcp2_version_cid vc;
   int rv = ngtcp2_pkt_decode_version_cid(&vc, data, datalen, QUIC_SCID_LEN);
+  if (rv == NGTCP2_ERR_VERSION_NEGOTIATION) {
+    quic_endpoint_send_version_negotiation(a->ep, &vc, a->remote);
+    return Qnil;
+  }
   /* A supported version never carries a DCID longer than this. */
   if (rv != 0 || vc.dcidlen > NGTCP2_MAX_CIDLEN) return Qnil;
 

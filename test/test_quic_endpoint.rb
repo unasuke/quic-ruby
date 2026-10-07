@@ -68,6 +68,29 @@ class TestQUICEndpoint < Minitest::Test
     assert_nil net.endpoint.connections.last.error
   end
 
+  def test_answers_unsupported_version_with_version_negotiation
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    initial = client.write_pkt
+    initial[1, 4] = [0x1a2a3a4a].pack("N")
+
+    assert_nil net.endpoint.read_pkt(initial, remote: net.address_of(client))
+    pkt, to = net.endpoint.write_pkt
+    assert_equal net.address_of(client), to
+    assert_nil net.endpoint.write_pkt
+    assert_empty net.endpoint.connections
+
+    assert_equal 0x80, pkt.getbyte(0) & 0x80 # long header
+    assert_equal 0, pkt.byteslice(1, 4).unpack1("N") # Version Negotiation
+    dcid, scid, rest = long_header_cids(pkt)
+    initial_dcid, initial_scid, = long_header_cids(initial)
+    assert_equal initial_scid, dcid
+    assert_equal initial_dcid, scid
+    versions = rest.unpack("N*")
+    assert_includes versions, 1
+    assert(versions.any? { |v| v & 0x0f0f0f0f == 0x0a0a0a0a }, "a reserved version is listed")
+  end
+
   def test_closed_connections_come_out_of_take_closed
     net = endpoint_network(tls_context)
     client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
@@ -148,5 +171,14 @@ class TestQUICEndpoint < Minitest::Test
       private_key_path: loopback_credentials.private_key_path,
       alpn: ALPN
     )
+  end
+
+  # The DCID and SCID of a long header packet, and what follows them.
+  def long_header_cids(pkt)
+    dcid_len = pkt.getbyte(5)
+    dcid = pkt.byteslice(6, dcid_len)
+    scid_len = pkt.getbyte(6 + dcid_len)
+    scid = pkt.byteslice(7 + dcid_len, scid_len)
+    [dcid, scid, pkt.byteslice(7 + dcid_len + scid_len..)]
   end
 end

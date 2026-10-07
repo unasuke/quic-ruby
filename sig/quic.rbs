@@ -240,9 +240,10 @@ module QUIC
 
   # Many server connections on one UDP socket, which must not be connected
   # and must be bound to the address it serves. The Endpoint routes each
-  # datagram to its connection and makes connections for new clients; the
-  # socket and the I/O loop stay with the caller. A connection's failure
-  # never raises from these methods; it closes that connection alone (see
+  # datagram to its connection, makes connections for new clients and
+  # answers what no connection can (Version Negotiation); the socket and the
+  # I/O loop stay with the caller. A connection's failure never raises from
+  # these methods; it closes that connection alone (see
   # Connection::Server#error). The connections have no socket, so only their
   # non-blocking methods work.
   class Endpoint
