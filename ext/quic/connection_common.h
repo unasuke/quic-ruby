@@ -3,6 +3,7 @@
 
 #include "quic.h"
 #include "quic/ext.h"
+#include "tls_context.h"
 
 /* Length of the source connection ID this endpoint picks for itself. */
 #define QUIC_SCID_LEN 8

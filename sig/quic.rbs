@@ -98,6 +98,15 @@ module QUIC
     def self.default: () -> Settings
   end
 
+  # A server's certificate chain, private key and ALPN protocols (in order
+  # of preference), read once and shared by every connection made from it.
+  # A connection keeps the context it started with even after this object
+  # is gone. Only .server makes one; a misconfiguration raises
+  # ArgumentError naming what could not be loaded or used.
+  class TLSContext
+    def self.server: (certificate_path: String | _ToPath, private_key_path: String | _ToPath, alpn: Array[String]) -> TLSContext
+  end
+
   module Connection
     # The I/O loop shared by Client and Server. An internal implementation
     # detail: not meant to be included in other classes.

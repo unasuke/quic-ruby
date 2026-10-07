@@ -137,6 +137,7 @@ Init_quic(void)
      stream handler (quic/ext.h) owns. */
   rb_eQUICErrorInvalidState = rb_define_class_under(rb_eQUICError, "InvalidState", rb_eQUICError);
 
+  Init_quic_tls_context(rb_mQUIC);
   Init_quic_connection_client(rb_mQUICConnection);
   Init_quic_connection_server(rb_mQUICConnection);
   Init_quic_stream(rb_mQUIC);
