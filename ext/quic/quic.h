@@ -43,8 +43,11 @@ extern VALUE rb_eQUICErrorInvalidState;
 void Init_quic_connection_client(VALUE rb_mQUICConnection);
 void Init_quic_connection_server(VALUE rb_mQUICConnection);
 
-/* Raise a QUIC::Error subclass mapped from an ngtcp2 negative error code.
-   Never returns. */
+/* A QUIC::Error subclass instance mapped from an ngtcp2 negative error code,
+   with the code in #code. Made, not raised. */
+VALUE quic_ngtcp2_error_new(int rv);
+
+/* Raise quic_ngtcp2_error_new(rv). Never returns. */
 NORETURN(void quic_raise_ngtcp2_error(int rv));
 
 #endif /* QUIC_H */

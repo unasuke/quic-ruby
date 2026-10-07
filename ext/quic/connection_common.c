@@ -890,16 +890,14 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   return buffer;
 }
 
-NORETURN(static void quic_conn_raise_error(quic_conn_t *c, int rv));
-
-/* Like quic_raise_ngtcp2_error, but for errors from read_pkt, where the TLS
+/* Like quic_ngtcp2_error_new, but for errors from read_pkt, where the TLS
    handshake runs: NGTCP2_ERR_CRYPTO carries the TLS alert this endpoint
    sent, and becomes CertificateVerifyFailed when the verifier rejected the
    peer. */
-static void
-quic_conn_raise_error(quic_conn_t *c, int rv)
+VALUE
+quic_conn_error_new(quic_conn_t *c, int rv)
 {
-  if (rv != NGTCP2_ERR_CRYPTO) quic_raise_ngtcp2_error(rv);
+  if (rv != NGTCP2_ERR_CRYPTO) return quic_ngtcp2_error_new(rv);
 
   /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
      verification failure, so report it as nil. */
@@ -918,7 +916,7 @@ quic_conn_raise_error(quic_conn_t *c, int rv)
   }
   rb_ivar_set(exc, rb_intern("@code"), INT2NUM(rv));
   rb_ivar_set(exc, rb_intern("@tls_alert"), alert ? INT2NUM(alert) : Qnil);
-  rb_exc_raise(exc);
+  return exc;
 }
 
 struct quic_read_pkt_args {
@@ -939,8 +937,8 @@ quic_read_pkt_body(VALUE arg)
                                 a->c->now);
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
-    /* NORETURN: longjmp passes through rb_ensure so unlock still fires. */
-    quic_conn_raise_error(a->c, rv);
+    /* longjmp passes through rb_ensure so unlock still fires. */
+    rb_exc_raise(quic_conn_error_new(a->c, rv));
   }
   return Qnil;
 }

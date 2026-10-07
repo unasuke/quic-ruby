@@ -88,6 +88,11 @@ extern ptls_cipher_suite_t *quic_cipher_suites[];
    pending_exc and handler_owner, which start as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
 
+/* The exception #read_pkt raises for rv, an error ngtcp2_conn_read_pkt
+   returned: a CryptoError (or CertificateVerifyFailed) with the TLS alert
+   for NGTCP2_ERR_CRYPTO, quic_ngtcp2_error_new(rv) otherwise. */
+VALUE quic_conn_error_new(quic_conn_t *c, int rv);
+
 quic_conn_t *quic_conn_get(VALUE self);
 
 /* The raw ngtcp2_conn of a Client or Server, for stream.c to issue ngtcp2
