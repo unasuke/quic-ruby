@@ -114,6 +114,13 @@ int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_
    for NGTCP2_ERR_CRYPTO, quic_ngtcp2_error_new(rv) otherwise. */
 VALUE quic_conn_error_new(quic_conn_t *c, int rv);
 
+/* Build a QUIC::Connection::Server of class klass for the client whose
+   first Initial is hd, received on path, with the TLS context tls_context
+   (a QUIC::TLSContext). Raises if ngtcp2 or picotls cannot set the
+   connection up. */
+VALUE quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *path,
+                           VALUE tls_context, VALUE transport_params, VALUE settings_v);
+
 quic_conn_t *quic_conn_get(VALUE self);
 
 /* The raw ngtcp2_conn of a Client or Server, for stream.c to issue ngtcp2
