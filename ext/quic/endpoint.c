@@ -781,6 +781,17 @@ quic_endpoint_stop_accepting(VALUE self)
   return Qnil;
 }
 
+/* #tls_context=: the context new connections are made with. Connections
+   already made keep theirs. */
+static VALUE
+quic_endpoint_set_tls_context(VALUE self, VALUE tls_context)
+{
+  quic_endpoint_t *ep = quic_endpoint_get(self);
+  quic_tls_context_get(tls_context);
+  ep->tls_context = tls_context;
+  return tls_context;
+}
+
 void
 Init_quic_endpoint(VALUE rb_mQUICArg)
 {
@@ -798,4 +809,5 @@ Init_quic_endpoint(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICEndpoint, "take_closed", quic_endpoint_take_closed, 0);
   rb_define_method(rb_cQUICEndpoint, "connections", quic_endpoint_connections, 0);
   rb_define_method(rb_cQUICEndpoint, "stop_accepting", quic_endpoint_stop_accepting, 0);
+  rb_define_method(rb_cQUICEndpoint, "tls_context=", quic_endpoint_set_tls_context, 1);
 }

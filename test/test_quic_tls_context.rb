@@ -3,11 +3,43 @@
 require "test_helper"
 require "pathname"
 
-# QUIC::TLSContext.server on its own. The checks it shares with
-# Connection::Server._accept, which builds one inside, are covered in
-# test_quic_server.rb; here only what TLSContext.server adds.
+# QUIC::TLSContext.server, and swapping it on an Endpoint. The checks it
+# shares with Connection::Server._accept, which builds one inside, are
+# covered in test_quic_server.rb; here only what TLSContext.server adds.
 class TestQUICTLSContext < Minitest::Test
   include TestCertificates
+  include TestEndpointNetwork
+
+  # After Endpoint#tls_context=, a new client meets the new certificate: one
+  # trusting only the new CA gets through and one trusting only the old CA
+  # is rejected. A connection made before the swap goes on, though nothing
+  # references its context's QUIC::TLSContext any more.
+  def test_swapped_context_applies_to_new_connections_only
+    other = TestCertificates.generate_loopback_credentials(ca_common_name: "quic-ruby second test CA")
+    net = endpoint_network(QUIC::TLSContext.server(**server_args))
+    old_client = net.connect(alpn: ["h3"], ca_file: loopback_credentials.ca_file)
+    net.run_until { old_client.handshake_completed? }
+
+    net.endpoint.tls_context = QUIC::TLSContext.server(
+      **server_args(certificate_path: other.certificate_path, private_key_path: other.private_key_path)
+    )
+    GC.start
+
+    new_client = net.connect(alpn: ["h3"], ca_file: other.ca_file)
+    rejected = net.connect(alpn: ["h3"], ca_file: loopback_credentials.ca_file)
+    net.run_until { new_client.handshake_completed? && net.error_of(rejected) }
+    assert_instance_of QUIC::Error::CertificateVerifyFailed, net.error_of(rejected)
+
+    stream = old_client.open_bidi_stream
+    stream.write_nonblock("still on the old certificate", fin: true)
+    state = {}
+    reply = +""
+    net.run_until do
+      echo_streams(net.endpoint, state)
+      read_to_end(stream, reply)
+    end
+    assert_equal "still on the old certificate", reply
+  end
 
   def test_server_returns_tls_context
     assert_instance_of QUIC::TLSContext, QUIC::TLSContext.server(**server_args)

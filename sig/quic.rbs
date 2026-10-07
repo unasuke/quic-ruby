@@ -293,6 +293,9 @@ module QUIC
 
     # Refuses every new connection from now on with CONNECTION_REFUSED.
     def stop_accepting: () -> nil
+
+    # The context new connections are made with; existing ones keep theirs.
+    def tls_context=: (TLSContext) -> TLSContext
   end
 
   class Stream

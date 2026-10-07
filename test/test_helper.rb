@@ -254,10 +254,12 @@ module TestCertificates
     @loopback_credentials ||= generate_loopback_credentials
   end
 
-  def self.generate_loopback_credentials
+  # A new set of LoopbackCredentials under a CA of its own, for a test that
+  # needs a second certificate nothing else trusts.
+  def self.generate_loopback_credentials(ca_common_name: "quic-ruby loopback test CA")
     now = Time.now
     ca_key = OpenSSL::PKey::EC.generate("prime256v1")
-    ca_name = OpenSSL::X509::Name.parse("/CN=quic-ruby loopback test CA")
+    ca_name = OpenSSL::X509::Name.parse("/CN=#{ca_common_name}")
     ca_cert = OpenSSL::X509::Certificate.new
     ca_cert.version = 2
     ca_cert.serial = 1
@@ -297,7 +299,6 @@ module TestCertificates
     File.write(credentials.private_key_path, server_key.private_to_pem)
     credentials
   end
-  private_class_method :generate_loopback_credentials
 
   # A throwaway self-signed CA (EC P-256, valid for one day) that no real
   # server chains to. Returns the certificate as PEM.
