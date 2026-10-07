@@ -16,8 +16,9 @@ VALUE rb_cQUICEndpoint;
 
 /* Many server connections on one UDP socket. The Endpoint routes each
    datagram by its DCID and answers what no connection can (Version
-   Negotiation, Stateless Reset); the I/O loop stays with the caller.
-   Dispatch follows Server::read_pkt in ngtcp2's examples/server.cc. */
+   Negotiation, Stateless Reset, CONNECTION_REFUSED); the I/O loop stays
+   with the caller. Dispatch follows Server::read_pkt in ngtcp2's
+   examples/server.cc. */
 struct quic_endpoint {
   /* CID -> the Connection::Server it routes to. A connection is entered
      under the client's first DCID and every SCID it issues. Keys are
@@ -39,6 +40,8 @@ struct quic_endpoint {
   VALUE tls_context;
   VALUE transport_params;
   VALUE settings;
+  long max_connections;
+  bool accepting;
   uint8_t reset_secret[QUIC_STATELESS_RESET_SECRETLEN];
   /* Stateless Resets left to send, and when the allowance last grew. */
   size_t reset_bucket;
@@ -289,6 +292,21 @@ quic_endpoint_send_stateless_reset(quic_endpoint_t *ep, const ngtcp2_cid *dcid, 
   quic_endpoint_push_response(ep, pkt, rb_str_dup(remote));
 }
 
+/* Turn a new connection away with CONNECTION_REFUSED in an Initial packet,
+   without making any state for it. */
+static void
+quic_endpoint_refuse(quic_endpoint_t *ep, const ngtcp2_pkt_hd *hd, VALUE remote)
+{
+  VALUE pkt = rb_str_buf_new(NGTCP2_MAX_UDP_PAYLOAD_SIZE);
+  /* Despite its documentation, this returns the packet's length. */
+  ngtcp2_ssize n = ngtcp2_crypto_write_connection_close(
+    (uint8_t *)RSTRING_PTR(pkt), NGTCP2_MAX_UDP_PAYLOAD_SIZE, hd->version, &hd->scid, &hd->dcid,
+    NGTCP2_CONNECTION_REFUSED, NULL, 0);
+  if (n <= 0) return;
+  rb_str_set_len(pkt, n);
+  quic_endpoint_push_response(ep, pkt, rb_str_dup(remote));
+}
+
 /* The closing and draining periods last three PTOs (RFC 9000 section
    10.2). */
 static ngtcp2_tstamp
@@ -433,7 +451,7 @@ quic_endpoint_close_conn(quic_endpoint_t *ep, quic_conn_t *c, const ngtcp2_ccerr
 }
 
 /* QUIC::Endpoint._new(local_sockaddr:, tls_context:, transport_params:,
-   settings:), every keyword required. Endpoint.new
+   settings:, max_connections:), every keyword required. Endpoint.new
    (lib/quic/endpoint.rb) fills in the defaults. */
 static VALUE
 quic_endpoint_s_new(int argc, VALUE *argv, VALUE klass)
@@ -442,13 +460,14 @@ quic_endpoint_s_new(int argc, VALUE *argv, VALUE klass)
   rb_scan_args(argc, argv, "0:", &opts);
   if (NIL_P(opts)) opts = rb_hash_new();
 
-  ID keywords[4];
-  VALUE values[4];
+  ID keywords[5];
+  VALUE values[5];
   keywords[0] = rb_intern("local_sockaddr");
   keywords[1] = rb_intern("tls_context");
   keywords[2] = rb_intern("transport_params");
   keywords[3] = rb_intern("settings");
-  rb_get_kwargs(opts, keywords, 4, 0, values);
+  keywords[4] = rb_intern("max_connections");
+  rb_get_kwargs(opts, keywords, 5, 0, values);
 
   quic_require_sockaddr(values[0], "local_sockaddr");
   quic_tls_context_get(values[1]);
@@ -458,6 +477,10 @@ quic_endpoint_s_new(int argc, VALUE *argv, VALUE klass)
   quic_fill_transport_params(&params, values[2]);
   ngtcp2_settings settings;
   quic_fill_settings(&settings, values[3]);
+  long max_connections = NUM2LONG(values[4]);
+  if (max_connections <= 0) {
+    rb_raise(rb_eArgError, "max_connections must be positive (got %ld)", max_connections);
+  }
 
   quic_endpoint_t *ep;
   VALUE self = TypedData_Make_Struct(klass, quic_endpoint_t, &quic_endpoint_data_type, ep);
@@ -468,6 +491,8 @@ quic_endpoint_s_new(int argc, VALUE *argv, VALUE klass)
   ep->tls_context = values[1];
   ep->transport_params = values[2];
   ep->settings = values[3];
+  ep->max_connections = max_connections;
+  ep->accepting = true;
   ep->reset_bucket = QUIC_STATELESS_RESET_BURST;
   ep->reset_refill_ts = quic_now();
   if (RAND_bytes(ep->reset_secret, sizeof(ep->reset_secret)) != 1) {
@@ -526,6 +551,11 @@ quic_endpoint_accept(struct quic_endpoint_read_args *a, const ngtcp2_cid *dcid)
     if (!(data[0] & 0x80) && datalen >= QUIC_SCID_LEN + 21) {
       quic_endpoint_send_stateless_reset(ep, dcid, datalen, a->remote);
     }
+    return Qnil;
+  }
+
+  if (!ep->accepting || RARRAY_LEN(ep->conns) >= ep->max_connections) {
+    quic_endpoint_refuse(ep, &hd, a->remote);
     return Qnil;
   }
 
@@ -742,6 +772,15 @@ quic_endpoint_connections(VALUE self)
   return rb_ary_dup(quic_endpoint_get(self)->conns);
 }
 
+/* #stop_accepting: refuse every new connection from now on with
+   CONNECTION_REFUSED. There is no way back. */
+static VALUE
+quic_endpoint_stop_accepting(VALUE self)
+{
+  quic_endpoint_get(self)->accepting = false;
+  return Qnil;
+}
+
 void
 Init_quic_endpoint(VALUE rb_mQUICArg)
 {
@@ -758,4 +797,5 @@ Init_quic_endpoint(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICEndpoint, "handle_expiry", quic_endpoint_handle_expiry, 0);
   rb_define_method(rb_cQUICEndpoint, "take_closed", quic_endpoint_take_closed, 0);
   rb_define_method(rb_cQUICEndpoint, "connections", quic_endpoint_connections, 0);
+  rb_define_method(rb_cQUICEndpoint, "stop_accepting", quic_endpoint_stop_accepting, 0);
 }

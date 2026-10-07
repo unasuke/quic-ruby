@@ -6,7 +6,8 @@ module QUIC
   # Many server connections on one UDP socket. The Endpoint routes each
   # datagram to its connection by connection ID, makes connections for new
   # clients and answers what no connection can (Version Negotiation,
-  # Stateless Reset). The socket and the I/O loop stay with the caller:
+  # Stateless Reset, CONNECTION_REFUSED). The socket and the I/O loop stay
+  # with the caller:
   #
   #   loop do
   #     data, addr = sock.recvfrom(65_535)            # or recvmsg_nonblock
@@ -29,15 +30,20 @@ module QUIC
     attr_reader :local_address
 
     # tls_context is a QUIC::TLSContext; its ALPN list is the server's, and
-    # settings.alpn is not read.
-    def self.new(local_address:, tls_context:, transport_params: nil, settings: nil)
+    # settings.alpn is not read. max_connections counts connections in their
+    # closing or draining period too.
+    def self.new(local_address:, tls_context:, transport_params: nil, settings: nil, max_connections: 1024)
       raise TypeError, "local_address must be an Addrinfo (got #{local_address.class})" unless local_address.is_a?(Addrinfo)
+      unless max_connections.is_a?(Integer)
+        raise TypeError, "max_connections must be an Integer (got #{max_connections.class})"
+      end
 
       endpoint = _new(
         local_sockaddr: local_address.to_sockaddr,
         tls_context: tls_context,
         transport_params: transport_params || QUIC::TransportParams.default,
-        settings: settings || QUIC::Settings.default
+        settings: settings || QUIC::Settings.default,
+        max_connections: max_connections
       )
       endpoint.instance_variable_set(:@local_address, local_address)
       endpoint

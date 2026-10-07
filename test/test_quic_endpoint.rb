@@ -14,6 +14,10 @@ class TestQUICEndpoint < Minitest::Test
     error = assert_raises(TypeError) { QUIC::Endpoint.new(local_address: "127.0.0.1", tls_context: tls_context) }
     assert_equal "local_address must be an Addrinfo (got String)", error.message
     assert_raises(TypeError) { QUIC::Endpoint.new(local_address: Addrinfo.udp("127.0.0.1", 0), tls_context: Object.new) }
+    error = assert_raises(ArgumentError) do
+      QUIC::Endpoint.new(local_address: Addrinfo.udp("127.0.0.1", 0), tls_context: tls_context, max_connections: 0)
+    end
+    assert_equal "max_connections must be positive (got 0)", error.message
     assert_raises(TypeError) { QUIC::Endpoint.allocate }
   end
 
@@ -133,6 +137,25 @@ class TestQUICEndpoint < Minitest::Test
     assert_nil server.close # no longer in the table
     # The client saw the CONNECTION_CLOSE.
     assert_instance_of QUIC::Error::Closed, net.error_of(client)
+  end
+
+  def test_refuses_connections_beyond_max_connections
+    net = endpoint_network(tls_context, max_connections: 1)
+    first = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { first.handshake_completed? }
+    second = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { net.error_of(second) }
+    assert_instance_of QUIC::Error::Closed, net.error_of(second)
+    assert_equal 1, net.endpoint.connections.size
+  end
+
+  def test_refuses_new_connections_after_stop_accepting
+    net = endpoint_network(tls_context)
+    net.endpoint.stop_accepting
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { net.error_of(client) }
+    assert_instance_of QUIC::Error::Closed, net.error_of(client)
+    assert_empty net.endpoint.connections
   end
 
   # A handshake that fails (here: no common ALPN) sends its CONNECTION_CLOSE
