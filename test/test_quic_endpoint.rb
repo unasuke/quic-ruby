@@ -91,6 +91,29 @@ class TestQUICEndpoint < Minitest::Test
     assert(versions.any? { |v| v & 0x0f0f0f0f == 0x0a0a0a0a }, "a reserved version is listed")
   end
 
+  # The Endpoint forgets a connection whose CONNECTION_CLOSE never reached
+  # the client. The client's next packet goes to a CID no longer in the
+  # table, and the Stateless Reset that answers it is one the client
+  # accepts.
+  def test_client_accepts_stateless_reset_for_a_forgotten_connection
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? && net.endpoint.connections.first&.handshake_completed? }
+
+    server = net.endpoint.connections.first
+    net.drop = ->(_pkt, _client) { true }
+    server.close
+    closed = []
+    net.run_until { closed.concat(net.endpoint.take_closed).include?(server) }
+    assert_empty net.endpoint.connections
+
+    net.drop = nil
+    client.open_bidi_stream.write_nonblock("anyone there?", fin: true)
+    net.run_until { net.error_of(client) }
+    assert_instance_of QUIC::Error::Closed, net.error_of(client)
+    assert_predicate client, :in_draining_period?
+  end
+
   def test_closed_connections_come_out_of_take_closed
     net = endpoint_network(tls_context)
     client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
@@ -138,6 +161,7 @@ class TestQUICEndpoint < Minitest::Test
     endpoint = endpoint_network(tls_context).endpoint
     remote = Addrinfo.udp("127.0.0.1", 50_000).to_sockaddr
     assert_nil endpoint.read_pkt("".b, remote: remote)
+    # Too short to answer with a Stateless Reset.
     assert_nil endpoint.read_pkt("\x40".b + "\x00".b * 10, remote: remote)
     assert_nil endpoint.write_pkt
   end

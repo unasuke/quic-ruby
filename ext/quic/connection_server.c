@@ -47,6 +47,14 @@ quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
      handshake fails if it is missing. */
   params.original_dcid = hd->dcid;
   params.original_dcid_present = 1;
+  /* Only an Endpoint can answer with a Stateless Reset, for a CID it no
+     longer knows, so only its connections announce a token. */
+  if (ep != NULL) {
+    if (quic_endpoint_generate_reset_token(ep, params.stateless_reset_token, &c->scid) != 0) {
+      rb_raise(rb_eRuntimeError, "ngtcp2_crypto_generate_stateless_reset_token failed");
+    }
+    params.stateless_reset_token_present = 1;
+  }
 
   /* quic_conn_alloc already zeroed the struct, but calling ctx_init keeps
      the ngtcp2-side initialization explicit, as in _open. */

@@ -163,7 +163,9 @@ quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
   RAND_bytes(dest, (int)destlen);
 }
 
-/* A connection an Endpoint holds enters the new CID in its table. */
+/* A connection an Endpoint holds derives the token from the Endpoint's
+   secret and enters the new CID in its table. Any other connection never
+   sends a Stateless Reset, so a random token does. */
 static int
 quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
                               ngtcp2_stateless_reset_token *token, size_t cidlen,
@@ -175,10 +177,14 @@ quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
   cid->datalen = cidlen;
-  if (RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
+  if (c->endpoint == NULL) {
+    return RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) == 1
+      ? 0 : NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+  if (quic_endpoint_generate_reset_token(c->endpoint, token->data, cid) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
-  if (c->endpoint != NULL) quic_endpoint_associate_cid(c->endpoint, cid, c->owner);
+  quic_endpoint_associate_cid(c->endpoint, cid, c->owner);
   return 0;
 }
 

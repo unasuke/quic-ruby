@@ -4,12 +4,20 @@
 
 #include <openssl/rand.h>
 
+/* How many Stateless Resets an Endpoint sends in a burst; the allowance comes
+   back at one a second. As examples/server.cc's
+   NGTCP2_STATELESS_RESET_BURST. */
+#define QUIC_STATELESS_RESET_BURST 100
+
+/* Length of the secret Stateless Reset tokens are derived from. */
+#define QUIC_STATELESS_RESET_SECRETLEN 32
+
 VALUE rb_cQUICEndpoint;
 
 /* Many server connections on one UDP socket. The Endpoint routes each
    datagram by its DCID and answers what no connection can (Version
-   Negotiation); the I/O loop stays with the caller. Dispatch follows
-   Server::read_pkt in ngtcp2's examples/server.cc. */
+   Negotiation, Stateless Reset); the I/O loop stays with the caller.
+   Dispatch follows Server::read_pkt in ngtcp2's examples/server.cc. */
 struct quic_endpoint {
   /* CID -> the Connection::Server it routes to. A connection is entered
      under the client's first DCID and every SCID it issues. Keys are
@@ -31,6 +39,10 @@ struct quic_endpoint {
   VALUE tls_context;
   VALUE transport_params;
   VALUE settings;
+  uint8_t reset_secret[QUIC_STATELESS_RESET_SECRETLEN];
+  /* Stateless Resets left to send, and when the allowance last grew. */
+  size_t reset_bucket;
+  ngtcp2_tstamp reset_refill_ts;
 };
 
 /* Seeds the CID hash, so that a client cannot pick initial DCIDs that
@@ -131,6 +143,7 @@ quic_endpoint_free(void *ptr)
     st_foreach(ep->cids, quic_endpoint_free_key_i, 0);
     st_free_table(ep->cids);
   }
+  OPENSSL_cleanse(ep->reset_secret, sizeof(ep->reset_secret));
   xfree(ep);
 }
 
@@ -180,6 +193,15 @@ quic_endpoint_dissociate_cid(quic_endpoint_t *ep, const ngtcp2_cid *cid, VALUE c
   if (st_delete(ep->cids, &key, &value)) xfree((void *)key);
 }
 
+int
+quic_endpoint_generate_reset_token(const quic_endpoint_t *ep, uint8_t *token,
+                                   const ngtcp2_cid *cid)
+{
+  return ngtcp2_crypto_generate_stateless_reset_token(token, ep->reset_secret,
+                                                      sizeof(ep->reset_secret), cid) == 0
+    ? 0 : -1;
+}
+
 static VALUE
 quic_addr_str(const ngtcp2_addr *addr)
 {
@@ -197,6 +219,22 @@ quic_conn_set_error(quic_conn_t *c, VALUE exc)
 {
   /* The first failure is the reason; what follows is its consequence. */
   if (NIL_P(c->error)) c->error = exc;
+}
+
+/* Take the Stateless Resets that came back since the last call, one per
+   whole second. Computed on read_pkt rather than with a timer. */
+static void
+quic_endpoint_refill_reset_bucket(quic_endpoint_t *ep, ngtcp2_tstamp now)
+{
+  if (ep->reset_bucket >= QUIC_STATELESS_RESET_BURST) {
+    ep->reset_refill_ts = now;
+    return;
+  }
+  uint64_t n = (now - ep->reset_refill_ts) / NGTCP2_SECONDS;
+  if (n == 0) return;
+  ep->reset_bucket = n >= QUIC_STATELESS_RESET_BURST - ep->reset_bucket
+    ? QUIC_STATELESS_RESET_BURST : ep->reset_bucket + (size_t)n;
+  ep->reset_refill_ts += n * NGTCP2_SECONDS;
 }
 
 static void
@@ -218,6 +256,34 @@ quic_endpoint_send_version_negotiation(quic_endpoint_t *ep, const ngtcp2_version
   ngtcp2_ssize n = ngtcp2_pkt_write_version_negotiation(
     (uint8_t *)RSTRING_PTR(pkt), NGTCP2_MAX_UDP_PAYLOAD_SIZE, unused_bits, vc->scid, vc->scidlen,
     vc->dcid, vc->dcidlen, versions, sizeof(versions) / sizeof(versions[0]));
+  if (n <= 0) return;
+  rb_str_set_len(pkt, n);
+  quic_endpoint_push_response(ep, pkt, rb_str_dup(remote));
+}
+
+/* Tell the peer that this Endpoint has no state for dcid, as
+   examples/server.cc's send_stateless_reset does. */
+static void
+quic_endpoint_send_stateless_reset(quic_endpoint_t *ep, const ngtcp2_cid *dcid, size_t pktlen,
+                                   VALUE remote)
+{
+  if (ep->reset_bucket == 0) return;
+  ep->reset_bucket--;
+
+  ngtcp2_stateless_reset_token token;
+  if (quic_endpoint_generate_reset_token(ep, token.data, dcid) != 0) return;
+
+  /* Shorter than the packet that prompted it, so that two endpoints cannot
+     keep answering each other's resets (RFC 9000 section 10.3.3): one byte
+     shorter up to 43 bytes, 42 bytes beyond. */
+  enum { MAX_RANDLEN = NGTCP2_MAX_CIDLEN + 22 - NGTCP2_STATELESS_RESET_TOKENLEN };
+  uint8_t rand_bytes[MAX_RANDLEN];
+  size_t randlen = pktlen <= 43 ? pktlen - NGTCP2_STATELESS_RESET_TOKENLEN - 1 : MAX_RANDLEN;
+  if (RAND_bytes(rand_bytes, (int)randlen) != 1) return;
+
+  VALUE pkt = rb_str_buf_new(NGTCP2_MAX_UDP_PAYLOAD_SIZE);
+  ngtcp2_ssize n = ngtcp2_pkt_write_stateless_reset2(
+    (uint8_t *)RSTRING_PTR(pkt), NGTCP2_MAX_UDP_PAYLOAD_SIZE, &token, rand_bytes, randlen);
   if (n <= 0) return;
   rb_str_set_len(pkt, n);
   quic_endpoint_push_response(ep, pkt, rb_str_dup(remote));
@@ -402,6 +468,11 @@ quic_endpoint_s_new(int argc, VALUE *argv, VALUE klass)
   ep->tls_context = values[1];
   ep->transport_params = values[2];
   ep->settings = values[3];
+  ep->reset_bucket = QUIC_STATELESS_RESET_BURST;
+  ep->reset_refill_ts = quic_now();
+  if (RAND_bytes(ep->reset_secret, sizeof(ep->reset_secret)) != 1) {
+    rb_raise(rb_eRuntimeError, "RAND_bytes(stateless reset secret) failed");
+  }
   ep->conns = rb_ary_new();
   ep->responses = rb_ary_new();
   ep->closed = rb_ary_new();
@@ -442,14 +513,21 @@ quic_endpoint_dispatch(struct quic_endpoint_read_args *a, VALUE conn)
 /* A packet for no connection in the table: a new connection, or one this
    Endpoint has forgotten. */
 static VALUE
-quic_endpoint_accept(struct quic_endpoint_read_args *a)
+quic_endpoint_accept(struct quic_endpoint_read_args *a, const ngtcp2_cid *dcid)
 {
   quic_endpoint_t *ep = a->ep;
   const uint8_t *data = (const uint8_t *)RSTRING_PTR(a->packet);
   size_t datalen = (size_t)RSTRING_LEN(a->packet);
 
   ngtcp2_pkt_hd hd;
-  if (ngtcp2_accept(&hd, data, datalen) != 0) return Qnil;
+  if (ngtcp2_accept(&hd, data, datalen) != 0) {
+    /* A short header packet long enough that a reset shorter than it can
+       still pass for one (examples/server.cc). */
+    if (!(data[0] & 0x80) && datalen >= QUIC_SCID_LEN + 21) {
+      quic_endpoint_send_stateless_reset(ep, dcid, datalen, a->remote);
+    }
+    return Qnil;
+  }
 
   /* As in Server._accept, a token is accepted without checking it. */
   VALUE conn = quic_server_conn_new(rb_cQUICConnectionServer, &hd, &a->path, ep->tls_context,
@@ -482,6 +560,8 @@ quic_endpoint_read_pkt_body(VALUE arg)
   const uint8_t *data = (const uint8_t *)RSTRING_PTR(a->packet);
   size_t datalen = (size_t)RSTRING_LEN(a->packet);
 
+  quic_endpoint_refill_reset_bucket(a->ep, quic_now());
+
   /* ngtcp2_pkt_decode_version_cid asserts datalen > 0. */
   if (datalen == 0) return Qnil;
 
@@ -500,7 +580,7 @@ quic_endpoint_read_pkt_body(VALUE arg)
   if (st_lookup(a->ep->cids, (st_data_t)&dcid, &conn)) {
     return quic_endpoint_dispatch(a, (VALUE)conn);
   }
-  return quic_endpoint_accept(a);
+  return quic_endpoint_accept(a, &dcid);
 }
 
 static VALUE

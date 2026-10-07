@@ -5,8 +5,8 @@ require "socket"
 module QUIC
   # Many server connections on one UDP socket. The Endpoint routes each
   # datagram to its connection by connection ID, makes connections for new
-  # clients and answers what no connection can (Version Negotiation). The
-  # socket and the I/O loop stay with the caller:
+  # clients and answers what no connection can (Version Negotiation,
+  # Stateless Reset). The socket and the I/O loop stay with the caller:
   #
   #   loop do
   #     data, addr = sock.recvfrom(65_535)            # or recvmsg_nonblock
