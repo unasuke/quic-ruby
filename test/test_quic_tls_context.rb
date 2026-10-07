@@ -4,8 +4,8 @@ require "test_helper"
 require "pathname"
 
 # QUIC::TLSContext.server on its own. The checks it shares with
-# Connection::Server._accept are covered in test_quic_server.rb; here only
-# what TLSContext.server adds.
+# Connection::Server._accept, which builds one inside, are covered in
+# test_quic_server.rb; here only what TLSContext.server adds.
 class TestQUICTLSContext < Minitest::Test
   include TestCertificates
 

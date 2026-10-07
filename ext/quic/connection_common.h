@@ -14,9 +14,13 @@
    (_open / _accept) are class specific. */
 typedef struct {
   ngtcp2_conn *conn;
-  /* Referenced by cptls.ptls, which only keeps the pointer, so this has to
-     outlive the ptls_t. */
+  /* Client only. Referenced by cptls.ptls, which only keeps the pointer, so
+     this has to outlive the ptls_t. */
   ptls_context_t tls_ctx;
+  /* Server only. The shared context cptls.ptls was made from, holding the
+     certificate chain, the signer and the ALPN list. This connection holds
+     a reference, released in quic_conn_free after the ptls_t. */
+  quic_tls_ctx_t *tls;
   /* Client only. Referenced by tls_ctx.verify_certificate when verify_mode
      is :peer. Holds a reference to an X509_STORE, released in
      quic_conn_free. */
@@ -26,21 +30,13 @@ typedef struct {
      read_pkt can raise CertificateVerifyFailed with the X509 error. */
   bool verify_failed;
   int verify_result;  /* X509_V_ERR_*, 0 when the server sent no certificate */
-  /* Server only. Referenced by tls_ctx.sign_certificate; holds a reference
-     to the private key, released in quic_conn_free. The certificate chain
-     itself lives in tls_ctx.certificates, also freed there. */
-  ptls_openssl_sign_certificate_t sign_cert;
-  bool sign_cert_initialized;
-  /* Server only. tls_ctx.on_client_hello points here; the callback recovers
-     this struct from its self argument with offsetof. */
-  ptls_on_client_hello_t on_client_hello;
   /* The TLS native handle handed to ngtcp2 (&cptls, not cptls.ptls). */
   ngtcp2_crypto_picotls_ctx cptls;
   /* [0]: QUIC transport params, filled in by ngtcp2; [1]: terminator. */
   ptls_raw_extension_t tls_exts[2];
-  /* ALPN list handed to picotls, which keeps the pointers for the whole
-     handshake (unlike SSL_set_alpn_protos, which copies). The entries point
-     into alpn_buf, and both are owned by this struct. */
+  /* Client only. ALPN list handed to picotls, which keeps the pointers for
+     the whole handshake (unlike SSL_set_alpn_protos, which copies). The
+     entries point into alpn_buf, and both are owned by this struct. */
   ptls_iovec_t *alpn;
   size_t alpn_count;
   uint8_t *alpn_buf;
