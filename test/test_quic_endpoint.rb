@@ -195,6 +195,19 @@ class TestQUICEndpoint < Minitest::Test
     assert_equal 1024, answers
   end
 
+  def test_new_raises_on_qlog_dir_that_is_not_a_writable_directory
+    Dir.mktmpdir do |dir|
+      missing = File.join(dir, "missing")
+      error = assert_raises(ArgumentError) do
+        QUIC::Endpoint.new(
+          local_address: Addrinfo.udp("127.0.0.1", 0), tls_context: tls_context,
+          settings: QUIC::Settings.default.with(qlog_dir: missing)
+        )
+      end
+      assert_equal "qlog_dir is not a writable directory: #{missing}", error.message
+    end
+  end
+
   def test_qlog_dir_gets_a_file_per_connection
     Dir.mktmpdir do |dir|
       net = endpoint_network(tls_context, settings: QUIC::Settings.default.with(qlog_dir: dir))

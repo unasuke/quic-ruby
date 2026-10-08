@@ -199,7 +199,8 @@ void quic_fill_settings(ngtcp2_settings *settings, VALUE st);
 /* When settings_v.qlog_dir is set, open <qlog_dir>/<c->scid in hex>.sqlog
    (as ngtcp2's examples name it) and have ngtcp2 write the connection's
    qlog there. c->scid must be set. A file that cannot be opened only goes
-   without qlog. */
+   without qlog: QUIC::Settings#check_qlog_dir already caught a wrong
+   directory when the connection or Endpoint was set up. */
 void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v, ngtcp2_settings *settings);
 
 /* Zero *callbacks and fill in everything both endpoints share. The caller

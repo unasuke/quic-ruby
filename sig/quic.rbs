@@ -102,6 +102,11 @@ module QUIC
     attr_reader qlog_dir: (String | _ToPath)?
 
     def self.default: () -> Settings
+
+    # Raises ArgumentError unless qlog_dir is nil or a directory this
+    # process can write to. Client.new, Connection::Server.accept and
+    # Endpoint.new call it.
+    def check_qlog_dir: () -> nil
   end
 
   # A server's certificate chain, private key and ALPN protocols (in order

@@ -53,5 +53,18 @@ module QUIC
         qlog_dir: nil
       )
     end
+
+    # Raises ArgumentError unless qlog_dir is nil or a directory this
+    # process can write to. Client.new, Connection::Server.accept and
+    # Endpoint.new call it, so that a wrong qlog_dir shows up when they are
+    # set up rather than as qlog files that never appear.
+    def check_qlog_dir
+      return if qlog_dir.nil?
+
+      path = qlog_dir.respond_to?(:to_path) ? qlog_dir.to_path : qlog_dir
+      return if path.is_a?(String) && File.directory?(path) && File.writable?(path)
+
+      raise ArgumentError, "qlog_dir is not a writable directory: #{path}"
+    end
   end
 end

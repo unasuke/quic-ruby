@@ -15,6 +15,23 @@ class TestQUICServer < Minitest::Test
     assert_raises(NoMethodError) { QUIC::Connection::Server.new }
   end
 
+  # The check comes before the wait for the first datagram: a sock that
+  # cannot even receive shows it never got that far.
+  def test_accept_raises_on_qlog_dir_that_is_not_a_writable_directory
+    Dir.mktmpdir do |dir|
+      missing = File.join(dir, "missing")
+      error = assert_raises(ArgumentError) do
+        QUIC::Connection::Server.accept(
+          sock: Object.new,
+          certificate_path: loopback_credentials.certificate_path,
+          private_key_path: loopback_credentials.private_key_path,
+          settings: QUIC::Settings.default.with(alpn: ["perf"], qlog_dir: missing)
+        )
+      end
+      assert_equal "qlog_dir is not a writable directory: #{missing}", error.message
+    end
+  end
+
   def test_accept_raises_on_missing_keywords
     keywords = "initial_packet, local_sockaddr, remote_sockaddr, certificate_path, " \
       "private_key_path, transport_params, settings"

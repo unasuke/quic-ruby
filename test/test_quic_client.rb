@@ -89,6 +89,20 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  def test_new_raises_on_qlog_dir_that_is_not_a_writable_directory
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, "file").tap { |path| File.write(path, "") }
+      [File.join(dir, "missing"), file].each do |qlog_dir|
+        error = assert_raises(ArgumentError) do
+          QUIC::Connection::Client.new(
+            host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: qlog_dir)
+          )
+        end
+        assert_equal "qlog_dir is not a writable directory: #{qlog_dir}", error.message
+      end
+    end
+  end
+
   def test_new_opens_a_qlog_file_named_after_its_scid
     Dir.mktmpdir do |dir|
       QUIC::Connection::Client.new(host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: dir))
