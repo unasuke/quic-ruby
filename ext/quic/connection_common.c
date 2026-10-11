@@ -345,6 +345,14 @@ quic_stream_open_body(VALUE arg)
   return Qnil;
 }
 
+void
+quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id)
+{
+  if (!ngtcp2_conn_is_local_stream2(conn, stream_id) && ngtcp2_is_bidi_stream(stream_id)) {
+    ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+  }
+}
+
 static int
 quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
 {
@@ -449,7 +457,10 @@ quic_stream_close_body(VALUE arg)
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
   VALUE stream = rb_hash_aref(streams, LL2NUM(a->stream_id));
-  if (NIL_P(stream)) return Qnil;
+  if (NIL_P(stream)) {
+    quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
+    return Qnil;
+  }
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
@@ -457,6 +468,16 @@ quic_stream_close_body(VALUE arg)
   if (a->flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
     s->close_has_app_error_code = true;
     s->close_app_error_code = a->app_error_code;
+  }
+  /* A stream still waiting in @accept_queue holds on to what it received.
+     Were the peer given its stream back now, it could open and close
+     streams until the queue had used up our memory, so it gets the stream
+     back only once the application has accepted this one
+     (QUIC::Stream#_accepted). */
+  if (s->accept_queued && !s->accepted) {
+    s->peer_stream_held = true;
+  } else {
+    quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
   }
   rb_hash_delete(streams, LL2NUM(a->stream_id));
   return Qnil;
@@ -467,14 +488,9 @@ quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                      uint64_t app_error_code, void *user_data,
                      void *stream_user_data)
 {
+  (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  /* Give the peer back the bidirectional stream it has used up, as ngtcp2's
-     examples/server.cc does. Without this the peer can open only
-     initial_max_streams_bidi streams over the whole connection. */
-  if (!ngtcp2_conn_is_local_stream2(conn, stream_id) && ngtcp2_is_bidi_stream(stream_id)) {
-    ngtcp2_conn_extend_max_streams_bidi(conn, 1);
-  }
   struct quic_stream_cb_args a = {
     .c = c, .stream_id = stream_id, .flags = flags, .app_error_code = app_error_code,
   };

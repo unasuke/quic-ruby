@@ -97,6 +97,12 @@ VALUE quic_path_value(VALUE value, const char *name);
    empty list leaves c->alpn_count at 0. */
 void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v);
 
+/* Give the peer back the stream stream_id used up, if it is a
+   bidirectional stream the peer opened, as ngtcp2's examples/server.cc
+   does when such a stream closes. Without this the peer can open only
+   initial_max_streams_bidi streams over the whole connection. */
+void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id);
+
 void quic_fill_transport_params(ngtcp2_transport_params *params, VALUE tp);
 void quic_fill_settings(ngtcp2_settings *settings, VALUE st);
 

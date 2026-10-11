@@ -11,7 +11,7 @@
 
 ### Fixed
 - `QUIC::Stream#read` and `#read_nonblock` give the peer flow control credit back for what they hand to the application. Before, a connection stopped receiving once `initial_max_data` (1 MiB by default) had been used up.
-- When a stream the peer opened closes, the peer may open another one. Before, it could open only `initial_max_streams_bidi` bidirectional streams over the whole connection.
+- When a stream the peer opened closes, the peer may open another one. Before, it could open only `initial_max_streams_bidi` bidirectional streams over the whole connection. A stream that closes while it waits for `#accept_stream` is given back only once it has been accepted, so that the streams waiting there stay within that limit.
 - An exception raised by Ruby code inside an ngtcp2 callback (for example a `FrozenError`) comes out of `#read_pkt`, `#write_pkt` or `#handle_expiry` instead of unwinding through ngtcp2.
 - `QUIC::Stream#write` and `#write_nonblock` count the bytes already queued but not yet sent against the peer's window, and `#write_pkt` no longer raises `QUIC::Error::FlowControl` when that window is full; the data waits until the peer extends it.
 

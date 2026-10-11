@@ -33,6 +33,11 @@ typedef struct {
      connection's @accept_queue, so recv_stream_data does not enqueue it
      again on subsequent data arrivals. */
   bool accept_queued;
+  /* Set once #accept_stream has handed the stream to the application. */
+  bool accepted;
+  /* The stream closed while it waited in @accept_queue: the peer gets the
+     stream it used up back when the stream is accepted. */
+  bool peer_stream_held;
 } quic_stream_t;
 
 extern const rb_data_type_t quic_stream_data_type;

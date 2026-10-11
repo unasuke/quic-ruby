@@ -78,7 +78,7 @@ module QUIC
       #
       # Returns a QUIC::Stream, or nil on timeout.
       def accept_stream(timeout: nil)
-        stream = @accept_queue.shift
+        stream = take_accepted_stream
         return stream unless stream.nil?
         return nil if timeout == 0
 
@@ -91,7 +91,7 @@ module QUIC
           else
             pump_once
           end
-          stream = @accept_queue.shift
+          stream = take_accepted_stream
           return stream unless stream.nil?
         end
       end
@@ -101,12 +101,21 @@ module QUIC
       # (IO::WaitReadable mixin) when the queue is empty. Does not require
       # #bind.
       def accept_stream_nonblock
-        stream = @accept_queue.shift
+        stream = take_accepted_stream
         raise QUIC::Error::WaitReadable, "no peer-initiated stream available" if stream.nil?
         stream
       end
 
       private
+
+      # The next stream off the accept queue, or nil. Telling the stream it
+      # has been accepted lets the peer open another one in place of a
+      # stream that closed while it waited in the queue.
+      def take_accepted_stream
+        stream = @accept_queue.shift
+        stream&.__send__(:_accepted)
+        stream
+      end
 
       def pump_timeout(caller_timeout)
         ngtcp2_expiry_ns = expiry

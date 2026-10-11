@@ -343,6 +343,25 @@ quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
   return Qnil;
 }
 
+/* Called by #accept_stream / #accept_stream_nonblock for the stream they
+   take off @accept_queue. A stream that closed while it waited there gives
+   the peer back the stream it used up now (see quic_stream_close_body). */
+static VALUE
+quic_stream_accepted_m(VALUE self)
+{
+  quic_stream_t *s;
+  TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
+  s->accepted = true;
+  if (s->peer_stream_held) {
+    s->peer_stream_held = false;
+    VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
+    if (!NIL_P(client_v)) {
+      quic_conn_give_back_peer_stream(quic_conn_ptr(client_v), s->stream_id);
+    }
+  }
+  return Qnil;
+}
+
 void
 Init_quic_stream(VALUE rb_mQUICArg)
 {
@@ -357,5 +376,6 @@ Init_quic_stream(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICStream, "close_read", quic_stream_close_read_m, 0);
   rb_define_method(rb_cQUICStream, "close", quic_stream_close_m, 0);
   rb_define_method(rb_cQUICStream, "reset", quic_stream_reset_m, -1);
+  rb_define_private_method(rb_cQUICStream, "_accepted", quic_stream_accepted_m, 0);
   /* #read (blocking) and #initiator are defined in lib/quic/stream.rb. */
 }

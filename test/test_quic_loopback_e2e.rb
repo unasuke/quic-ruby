@@ -130,6 +130,53 @@ class TestQUICLoopbackE2E < Minitest::Test
     stop_server(server_thread)
   end
 
+  # A stream the peer opens and closes again (STOP_SENDING makes the server
+  # reset its side) waits in the server's accept queue with what it
+  # carried. The peer gets no stream in its place until the server accepts
+  # it; otherwise a peer could grow the queue without end.
+  def test_streams_waiting_to_be_accepted_count_against_the_peers_limit
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    accept = Thread::Queue.new
+    server_thread = start_server_thread do
+      server = accept_loopback_server(
+        server_sock, creds,
+        transport_params: QUIC::TransportParams.default.with(initial_max_streams_bidi: 2)
+      )
+      server.pump_once(timeout: 0.05) while accept.empty?
+      stream = server.accept_stream(timeout: 0)
+      raise "no stream waiting to be accepted" if stream.nil?
+      data = stream.read
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection.
+      end
+      data
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    2.times do |i|
+      stream = client.open_bidi_stream
+      stream.write("stream #{i}", fin: true)
+      stream.close_read
+    end
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+    client.pump_once(timeout: 0.05) while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    error = assert_raises(QUIC::Error::Unknown) { client.open_bidi_stream }
+    assert_includes error.message, "STREAM_ID_BLOCKED"
+
+    accept << true
+    open_bidi_stream_when_allowed(client)
+    client.close
+
+    assert_equal "stream 0", finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
   # Ruby code inside an ngtcp2 callback that raises must not unwind through
   # ngtcp2. With the client's stream registry frozen, stream_open fails when
   # the server opens a stream, and the FrozenError comes out of read_pkt.
