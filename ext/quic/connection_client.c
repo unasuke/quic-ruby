@@ -134,8 +134,8 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
              "all keywords required: local_sockaddr, remote_sockaddr, server_name, transport_params, settings");
   }
 
-  quic_require_binary(local_sockaddr,  "local_sockaddr");
-  quic_require_binary(remote_sockaddr, "remote_sockaddr");
+  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
   Check_Type(server_name, T_STRING);
 
   VALUE self = quic_conn_alloc(klass);

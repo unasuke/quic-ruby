@@ -50,8 +50,8 @@ quic_library_versions(VALUE self)
   return h;
 }
 
-void
-quic_raise_ngtcp2_error(int rv)
+VALUE
+quic_ngtcp2_error_new(int rv)
 {
   VALUE cls;
   switch (rv) {
@@ -90,7 +90,13 @@ quic_raise_ngtcp2_error(int rv)
 
   VALUE exc = rb_exc_new_cstr(cls, ngtcp2_strerror(rv));
   rb_ivar_set(exc, rb_intern("@code"), INT2NUM(rv));
-  rb_exc_raise(exc);
+  return exc;
+}
+
+void
+quic_raise_ngtcp2_error(int rv)
+{
+  rb_exc_raise(quic_ngtcp2_error_new(rv));
 }
 
 RUBY_FUNC_EXPORTED void
@@ -140,5 +146,6 @@ Init_quic(void)
   Init_quic_tls_context(rb_mQUIC);
   Init_quic_connection_client(rb_mQUICConnection);
   Init_quic_connection_server(rb_mQUICConnection);
+  Init_quic_endpoint(rb_mQUIC);
   Init_quic_stream(rb_mQUIC);
 }

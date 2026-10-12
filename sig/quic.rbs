@@ -163,6 +163,9 @@ module QUIC
       # after the connection has already entered the closing or draining
       # period is a no-op.
       def close: (?error_code: Integer, ?reason: String) -> nil
+
+      # Always nil: only a connection an Endpoint made has a closing reason.
+      def error: () -> Exception?
     end
 
     class Server
@@ -219,11 +222,80 @@ module QUIC
       # Sends an application CONNECTION_CLOSE (frame type 0x1d) to the peer
       # carrying error_code and reason, then transitions the underlying
       # ngtcp2_conn to the closing period. Requires #bind to have been
-      # called; raises QUIC::Error::NotBound otherwise. A second #close call
-      # after the connection has already entered the closing or draining
-      # period is a no-op.
+      # called; raises QUIC::Error::NotBound otherwise. A connection an
+      # Endpoint made needs no #bind: the CONNECTION_CLOSE goes out through
+      # Endpoint#write_pkt. A second #close call after the connection has
+      # already entered the closing or draining period, or after it left
+      # its Endpoint, is a no-op.
       def close: (?error_code: Integer, ?reason: String) -> nil
+
+      # Why the Endpoint closed this connection: nil when the peer closed it,
+      # it timed out idle or #close was called; the exception itself when
+      # Ruby code in a callback raised; otherwise a QUIC::Error made (not
+      # raised) from ngtcp2's error code. Always nil for a connection no
+      # Endpoint made.
+      def error: () -> Exception?
     end
+  end
+
+  # Many server connections on one UDP socket, which must not be connected
+  # and must be bound to the address it serves. The Endpoint routes each
+  # datagram to its connection, makes connections for new clients and
+  # answers what no connection can (Version Negotiation, Stateless Reset,
+  # CONNECTION_REFUSED); the socket and the I/O loop stay with the caller.
+  # A connection's failure never raises from these methods; it closes that
+  # connection alone (see Connection::Server#error). The connections have
+  # no socket, so only their non-blocking methods work.
+  class Endpoint
+    attr_reader local_address: Addrinfo
+
+    # tls_context's ALPN list is the server's; settings.alpn is not read.
+    # max_connections counts closing and draining connections too.
+    def self.new: (
+      local_address: Addrinfo,
+      tls_context: TLSContext,
+      ?transport_params: TransportParams?,
+      ?settings: Settings?,
+      ?max_connections: Integer
+    ) -> Endpoint
+
+    def self._new: (
+      local_sockaddr: String,
+      tls_context: TLSContext,
+      transport_params: TransportParams,
+      settings: Settings,
+      max_connections: Integer
+    ) -> Endpoint
+
+    # Routes one datagram from remote (an AF_INET or AF_INET6 sockaddr, as
+    # Addrinfo#to_sockaddr makes; ArgumentError otherwise); local defaults
+    # to local_address. Returns the connection it went to, which may be a
+    # new one, or nil when the Endpoint answered or dropped it.
+    def read_pkt: (String packet, remote: String, ?local: String?) -> Connection::Server?
+
+    # The next datagram to send and its destination sockaddr, or nil when
+    # there is none left: the Endpoint's own answers first (at most 1024
+    # wait; any beyond are dropped), then each connection's packets in turn.
+    def write_pkt: () -> [String, String]?
+
+    # The earliest CLOCK_MONOTONIC time (ns) #handle_expiry is due, or nil.
+    def expiry: () -> Integer?
+
+    # Runs the timers that are due and takes out of the table the
+    # connections that are finished.
+    def handle_expiry: () -> nil
+
+    # The connections that left the table since the last call.
+    def take_closed: () -> Array[Connection::Server]
+
+    # The connections in the table, closing and draining ones included.
+    def connections: () -> Array[Connection::Server]
+
+    # Refuses every new connection from now on with CONNECTION_REFUSED.
+    def stop_accepting: () -> nil
+
+    # The context new connections are made with; existing ones keep theirs.
+    def tls_context=: (TLSContext) -> TLSContext
   end
 
   class Stream

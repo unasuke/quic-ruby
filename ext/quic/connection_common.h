@@ -8,6 +8,13 @@
 /* Length of the source connection ID this endpoint picks for itself. */
 #define QUIC_SCID_LEN 8
 
+/* Buffer size for #write_pkt. NGTCP2_MAX_UDP_PAYLOAD_SIZE (1200) is the
+   minimum destlen ngtcp2 accepts. Revisit when PMTUD is enabled (Phase 4+). */
+#define QUIC_WRITE_PKT_BUFLEN NGTCP2_MAX_UDP_PAYLOAD_SIZE
+
+/* A QUIC::Endpoint (endpoint.c). */
+typedef struct quic_endpoint quic_endpoint_t;
+
 /* The C side of a QUIC::Connection::Client or QUIC::Connection::Server. Both
    classes wrap it with quic_conn_data_type, so stream.c can reach the
    ngtcp2_conn of either through quic_conn_ptr. Only the constructors
@@ -77,6 +84,27 @@ typedef struct {
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
+  /* The rest is for a connection a QUIC::Endpoint made, and stays zero (nil)
+     otherwise. endpoint is the Endpoint whose table holds this connection,
+     NULL once it has left the table; endpoint_owner is that Endpoint's
+     object, marked so that it outlives the connections it holds. */
+  bool from_endpoint;
+  quic_endpoint_t *endpoint;
+  VALUE endpoint_owner;
+  /* Why the Endpoint closed the connection (Connection#error): nil for a
+     close by the peer, by idle timeout or by #close. */
+  VALUE error;
+  /* When the closing or draining period ends; 0 while the connection is
+     open. */
+  ngtcp2_tstamp close_deadline;
+  /* The CONNECTION_CLOSE packet built on entering the closing period, sent
+     again for packets the peer keeps sending, at most three times what they
+     add up to and with exponential backoff (examples/server.cc). */
+  VALUE closebuf;
+  uint64_t close_bytes_recv;
+  uint64_t close_bytes_sent;
+  uint64_t close_pkts_recv;
+  uint64_t close_next_pkts_recv;
 } quic_conn_t;
 
 extern const rb_data_type_t quic_conn_data_type;
@@ -85,8 +113,39 @@ extern ptls_key_exchange_algorithm_t *quic_key_exchanges[];
 extern ptls_cipher_suite_t *quic_cipher_suites[];
 
 /* Allocator for both connection classes. The struct starts zeroed, except
-   pending_exc and handler_owner, which start as Qnil. */
+   its VALUE fields, which start as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
+
+/* CLOCK_MONOTONIC in ngtcp2's units (nanoseconds). */
+ngtcp2_tstamp quic_now(void);
+
+/* Build the next packet of the connection self (wrapping c) into dest of
+   QUIC_WRITE_PKT_BUFLEN bytes, as #write_pkt does, and store its path in
+   *path. Returns the packet's length, 0 when there is nothing to send, or a
+   negative ngtcp2 error. Never raises for the connection's own failures: an
+   exception from a Ruby callback is left in c->pending_exc. */
+ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path,
+                                     uint8_t *dest);
+
+/* Feed one datagram to the connection, as #read_pkt does, and return what
+   ngtcp2_conn_read_pkt returned. Like quic_conn_write_pkt_raw, it leaves an
+   exception from a Ruby callback in c->pending_exc. */
+int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
+                           size_t datalen);
+
+/* The exception #read_pkt raises for rv, an error ngtcp2_conn_read_pkt
+   returned: a CryptoError (or CertificateVerifyFailed) with the TLS alert
+   for NGTCP2_ERR_CRYPTO, quic_ngtcp2_error_new(rv) otherwise. */
+VALUE quic_conn_error_new(quic_conn_t *c, int rv);
+
+/* Build a QUIC::Connection::Server of class klass for the client whose
+   first Initial is hd, received on path, with the TLS context tls_context
+   (a QUIC::TLSContext). ep is the Endpoint that will hold it (its object
+   ep_owner), or NULL for Server.accept. Raises if ngtcp2 or picotls cannot
+   set the connection up. */
+VALUE quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *path,
+                           VALUE tls_context, VALUE transport_params, VALUE settings_v,
+                           quic_endpoint_t *ep, VALUE ep_owner);
 
 quic_conn_t *quic_conn_get(VALUE self);
 
@@ -100,6 +159,12 @@ ngtcp2_conn *quic_conn_ptr(VALUE owner);
 ngtcp2_conn *quic_conn_get_conn(ngtcp2_crypto_conn_ref *conn_ref);
 
 void quic_require_binary(VALUE str, const char *name);
+
+/* str must be a binary String holding an AF_INET or AF_INET6 sockaddr of
+   exactly that family's size, as Addrinfo#to_sockaddr makes. ngtcp2 copies
+   an address by its length into storage only as large as sockaddr_in6, so
+   anything longer would overrun it. Raises ArgumentError otherwise. */
+void quic_require_sockaddr(VALUE str, const char *name);
 
 /* Validate a path argument and return it as a String, or Qnil for nil.
    Accepts a String or anything responding to #to_path, and raises

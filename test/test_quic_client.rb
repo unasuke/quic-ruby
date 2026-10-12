@@ -89,6 +89,20 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  # ngtcp2 copies an address by its length into room for a sockaddr_in6, so
+  # only an AF_INET or AF_INET6 sockaddr of its exact size may get through.
+  def test_read_pkt_raises_on_anything_but_an_inet_sockaddr
+    client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
+    sockaddr = Addrinfo.udp("127.0.0.1", 0).to_sockaddr
+    binary_packet = String.new("\x00", encoding: Encoding::BINARY)
+    ["x".b * 256, "".b, sockaddr + "\x00".b, Addrinfo.unix("/tmp/quic.sock").to_sockaddr].each do |bad|
+      error = assert_raises(ArgumentError) do
+        client.read_pkt(binary_packet, local_sockaddr: sockaddr, remote_sockaddr: bad)
+      end
+      assert_equal "remote_sockaddr must be an AF_INET or AF_INET6 sockaddr (Addrinfo#to_sockaddr)", error.message
+    end
+  end
+
   def test_handshake_completed_is_false_initially
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
     assert_equal false, client.handshake_completed?

@@ -1,4 +1,5 @@
 #include "connection_common.h"
+#include "endpoint.h"
 #include "stream.h"
 
 #include <netinet/in.h>
@@ -7,10 +8,6 @@
 #include <time.h>
 
 #include <openssl/rand.h>
-
-/* Buffer size for #write_pkt. NGTCP2_MAX_UDP_PAYLOAD_SIZE (1200) is the
-   minimum destlen ngtcp2 accepts. Revisit when PMTUD is enabled (Phase 4+). */
-#define QUIC_WRITE_PKT_BUFLEN NGTCP2_MAX_UDP_PAYLOAD_SIZE
 
 /* picotls sends a key share only for the first entry; the others are offered
    in supported_groups and reached via HelloRetryRequest. X25519 is first so
@@ -37,6 +34,9 @@ static void
 quic_conn_free(void *ptr)
 {
   quic_conn_t *c = (quic_conn_t *)ptr;
+  /* The Endpoint may be swept in the same GC cycle and freed first; nothing
+     from here on may reach its CID table. */
+  c->endpoint = NULL;
   if (c->conn) ngtcp2_conn_del(c->conn);
   if (c->cptls.ptls) {
     /* Safe even when configure_client_session never ran or failed midway. */
@@ -66,6 +66,9 @@ quic_conn_mark(void *ptr)
   quic_conn_t *c = (quic_conn_t *)ptr;
   rb_gc_mark_movable(c->pending_exc);
   rb_gc_mark_movable(c->handler_owner);
+  rb_gc_mark_movable(c->endpoint_owner);
+  rb_gc_mark_movable(c->error);
+  rb_gc_mark_movable(c->closebuf);
 }
 
 /* GC.compact may relocate the owner connection object. Follow it so the
@@ -79,6 +82,9 @@ quic_conn_compact(void *ptr)
   c->owner = rb_gc_location(c->owner);
   c->pending_exc = rb_gc_location(c->pending_exc);
   c->handler_owner = rb_gc_location(c->handler_owner);
+  c->endpoint_owner = rb_gc_location(c->endpoint_owner);
+  c->error = rb_gc_location(c->error);
+  c->closebuf = rb_gc_location(c->closebuf);
 }
 
 const rb_data_type_t quic_conn_data_type = {
@@ -95,6 +101,9 @@ quic_conn_alloc(VALUE klass)
   memset(c, 0, sizeof(*c));
   c->pending_exc = Qnil;
   c->handler_owner = Qnil;
+  c->endpoint_owner = Qnil;
+  c->error = Qnil;
+  c->closebuf = Qnil;
   return TypedData_Wrap_Struct(klass, &quic_conn_data_type, c);
 }
 
@@ -139,7 +148,7 @@ quic_conn_ptr(VALUE owner)
   return quic_conn_get(owner)->conn;
 }
 
-static ngtcp2_tstamp
+ngtcp2_tstamp
 quic_now(void)
 {
   struct timespec ts;
@@ -154,20 +163,37 @@ quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
   RAND_bytes(dest, (int)destlen);
 }
 
+/* A connection an Endpoint holds derives the token from the Endpoint's
+   secret and enters the new CID in its table. Any other connection never
+   sends a Stateless Reset, so a random token does. */
 static int
 quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
                               ngtcp2_stateless_reset_token *token, size_t cidlen,
                               void *user_data)
 {
   (void)conn;
-  (void)user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
   if (RAND_bytes(cid->data, (int)cidlen) != 1) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
   cid->datalen = cidlen;
-  if (RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
+  if (c->endpoint == NULL) {
+    return RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) == 1
+      ? 0 : NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+  if (quic_endpoint_generate_reset_token(c->endpoint, token->data, cid) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
+  quic_endpoint_associate_cid(c->endpoint, cid, c->owner);
+  return 0;
+}
+
+static int
+quic_remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid, void *user_data)
+{
+  (void)conn;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->endpoint != NULL) quic_endpoint_dissociate_cid(c->endpoint, cid, c->owner);
   return 0;
 }
 
@@ -184,6 +210,23 @@ quic_require_binary(VALUE str, const char *name)
   if (rb_enc_get_index(str) != rb_ascii8bit_encindex()) {
     rb_raise(rb_eArgError, "%s must be ASCII-8BIT (binary) encoding", name);
   }
+}
+
+void
+quic_require_sockaddr(VALUE str, const char *name)
+{
+  quic_require_binary(str, name);
+
+  long len = RSTRING_LEN(str);
+  sa_family_t family = AF_UNSPEC;
+  if (len >= (long)(offsetof(struct sockaddr, sa_family) + sizeof(family))) {
+    memcpy(&family, RSTRING_PTR(str) + offsetof(struct sockaddr, sa_family), sizeof(family));
+  }
+  if ((family == AF_INET && len == (long)sizeof(struct sockaddr_in)) ||
+      (family == AF_INET6 && len == (long)sizeof(struct sockaddr_in6))) {
+    return;
+  }
+  rb_raise(rb_eArgError, "%s must be an AF_INET or AF_INET6 sockaddr (Addrinfo#to_sockaddr)", name);
 }
 
 static uint64_t
@@ -628,6 +671,7 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
   callbacks->version_negotiation = ngtcp2_crypto_version_negotiation_cb;
   callbacks->rand = quic_rand_cb;
   callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
+  callbacks->remove_connection_id = quic_remove_connection_id_cb;
   callbacks->stream_open = quic_stream_open_cb;
   callbacks->recv_stream_data = quic_recv_stream_data_cb;
   callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
@@ -817,6 +861,18 @@ quic_conn_write_pkt_handler(quic_conn_t *c, ngtcp2_path *path, ngtcp2_pkt_info *
   }
 }
 
+ngtcp2_ssize
+quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path, uint8_t *dest)
+{
+  ngtcp2_pkt_info pi;
+  memset(&pi, 0, sizeof(pi));
+
+  c->now = quic_now();
+  return c->handler
+    ? quic_conn_write_pkt_handler(c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN)
+    : quic_conn_write_pkt_streams(self, c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN);
+}
+
 static VALUE
 quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
 {
@@ -842,16 +898,8 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   ngtcp2_path_storage path_storage;
   ngtcp2_path_storage_zero(&path_storage);
 
-  ngtcp2_pkt_info pi;
-  memset(&pi, 0, sizeof(pi));
-
-  uint8_t *dest = (uint8_t *)RSTRING_PTR(buffer);
-  size_t destlen = (size_t)QUIC_WRITE_PKT_BUFLEN;
-
-  c->now = quic_now();
-  ngtcp2_ssize n = c->handler
-    ? quic_conn_write_pkt_handler(c, &path_storage.path, &pi, dest, destlen)
-    : quic_conn_write_pkt_streams(self, c, &path_storage.path, &pi, dest, destlen);
+  ngtcp2_ssize n =
+    quic_conn_write_pkt_raw(self, c, &path_storage.path, (uint8_t *)RSTRING_PTR(buffer));
 
   if (!NIL_P(c->pending_exc)) {
     rb_str_set_len(buffer, 0);
@@ -873,16 +921,14 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   return buffer;
 }
 
-NORETURN(static void quic_conn_raise_error(quic_conn_t *c, int rv));
-
-/* Like quic_raise_ngtcp2_error, but for errors from read_pkt, where the TLS
+/* Like quic_ngtcp2_error_new, but for errors from read_pkt, where the TLS
    handshake runs: NGTCP2_ERR_CRYPTO carries the TLS alert this endpoint
    sent, and becomes CertificateVerifyFailed when the verifier rejected the
    peer. */
-static void
-quic_conn_raise_error(quic_conn_t *c, int rv)
+VALUE
+quic_conn_error_new(quic_conn_t *c, int rv)
 {
-  if (rv != NGTCP2_ERR_CRYPTO) quic_raise_ngtcp2_error(rv);
+  if (rv != NGTCP2_ERR_CRYPTO) return quic_ngtcp2_error_new(rv);
 
   /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
      verification failure, so report it as nil. */
@@ -901,29 +947,36 @@ quic_conn_raise_error(quic_conn_t *c, int rv)
   }
   rb_ivar_set(exc, rb_intern("@code"), INT2NUM(rv));
   rb_ivar_set(exc, rb_intern("@tls_alert"), alert ? INT2NUM(alert) : Qnil);
-  rb_exc_raise(exc);
+  return exc;
+}
+
+int
+quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
+                       size_t datalen)
+{
+  ngtcp2_pkt_info pi;
+  memset(&pi, 0, sizeof(pi));
+
+  c->now = quic_now();
+  return ngtcp2_conn_read_pkt(c->conn, path, &pi, data, datalen, c->now);
 }
 
 struct quic_read_pkt_args {
   quic_conn_t *c;
   VALUE packet;
   ngtcp2_path path;
-  ngtcp2_pkt_info pi;
 };
 
 static VALUE
 quic_read_pkt_body(VALUE arg)
 {
   struct quic_read_pkt_args *a = (struct quic_read_pkt_args *)arg;
-  a->c->now = quic_now();
-  int rv = ngtcp2_conn_read_pkt(a->c->conn, &a->path, &a->pi,
-                                (const uint8_t *)RSTRING_PTR(a->packet),
-                                (size_t)RSTRING_LEN(a->packet),
-                                a->c->now);
+  int rv = quic_conn_read_pkt_raw(a->c, &a->path, (const uint8_t *)RSTRING_PTR(a->packet),
+                                  (size_t)RSTRING_LEN(a->packet));
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
-    /* NORETURN: longjmp passes through rb_ensure so unlock still fires. */
-    quic_conn_raise_error(a->c, rv);
+    /* longjmp passes through rb_ensure so unlock still fires. */
+    rb_exc_raise(quic_conn_error_new(a->c, rv));
   }
   return Qnil;
 }
@@ -954,8 +1007,8 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
   }
 
   quic_require_binary(packet,          "packet");
-  quic_require_binary(local_sockaddr,  "local_sockaddr");
-  quic_require_binary(remote_sockaddr, "remote_sockaddr");
+  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
 
   quic_conn_t *c = quic_conn_get(self);
 
@@ -967,7 +1020,6 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
   args.path.remote.addr    = (struct sockaddr *)RSTRING_PTR(remote_sockaddr);
   args.path.remote.addrlen = (ngtcp2_socklen)RSTRING_LEN(remote_sockaddr);
   args.path.user_data      = NULL;
-  memset(&args.pi, 0, sizeof(args.pi));
 
   rb_str_locktmp(packet);
   return rb_ensure(quic_read_pkt_body, (VALUE)&args,
@@ -1096,6 +1148,18 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
     return Qnil;
   }
 
+  /* A connection an Endpoint made has no socket: the CONNECTION_CLOSE goes
+     out through Endpoint#write_pkt. Once it has left the Endpoint's table
+     it is finished, and #close does nothing. */
+  if (c->from_endpoint) {
+    if (c->endpoint == NULL) return Qnil;
+    ngtcp2_ccerr ccerr;
+    ngtcp2_ccerr_set_application_error(&ccerr, error_code, reason_len > 0 ? reason_ptr : NULL,
+                                       reason_len);
+    quic_endpoint_close_conn(c->endpoint, c, &ccerr);
+    return Qnil;
+  }
+
   VALUE sock = rb_ivar_get(self, rb_intern("@sock"));
   if (NIL_P(sock)) {
     rb_raise(rb_eQUICErrorNotBound, "%"PRIsVALUE"#bind(sock) has not been called",
@@ -1141,6 +1205,14 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
   return Qnil;
 }
 
+/* Why an Endpoint closed this connection; see quic_conn_t.error. Always nil
+   for a connection no Endpoint made. */
+static VALUE
+quic_conn_error_m(VALUE self)
+{
+  return quic_conn_get(self)->error;
+}
+
 void
 quic_conn_define_shared_methods(VALUE klass)
 {
@@ -1154,4 +1226,5 @@ quic_conn_define_shared_methods(VALUE klass)
   rb_define_method(klass, "open_bidi_stream", quic_conn_open_bidi_stream, 0);
   rb_define_method(klass, "open_uni_stream", quic_conn_open_uni_stream, 0);
   rb_define_method(klass, "close", quic_conn_close_m, -1);
+  rb_define_method(klass, "error", quic_conn_error_m, 0);
 }
