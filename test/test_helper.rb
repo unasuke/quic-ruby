@@ -6,7 +6,84 @@ require "quic"
 require "minitest/autorun"
 require "fileutils"
 require "openssl"
+require "socket"
 require "tmpdir"
+
+# A Server in a thread and a Client in the main thread, talking over UDP on
+# 127.0.0.1. Pumping both ends from one thread would deadlock. ALPN defaults
+# to the including test class's ALPN constant.
+module TestLoopback
+  JOIN_TIMEOUT = 15
+
+  def bind_server_socket
+    sock = UDPSocket.new(Socket::AF_INET)
+    sock.bind("127.0.0.1", 0)
+    [sock, sock.addr[1]]
+  end
+
+  # Exceptions in the thread are collected by #finish_server rather than
+  # reported when the thread dies.
+  def start_server_thread
+    Thread.new do
+      Thread.current.report_on_exception = false
+      yield
+    end
+  end
+
+  # Wait for the server thread and return its value. Thread#join re-raises
+  # whatever the thread raised.
+  def finish_server(thread)
+    flunk "server thread did not finish within #{JOIN_TIMEOUT} seconds" unless thread.join(JOIN_TIMEOUT)
+    thread.value
+  end
+
+  # Cleanup after the sockets are closed. A server still blocked in
+  # Server.accept (no datagram arrived) or in the I/O loop gets IOError from
+  # the closed socket and ends. What it raised was either examined already
+  # or is not the reason the test failed.
+  def stop_server(thread)
+    thread&.join(JOIN_TIMEOUT)
+  rescue
+    nil
+  end
+
+  # Accept the first client on server_sock. The handshake is left to the
+  # caller, so that it can attach a stream handler before any stream exists.
+  def accept_loopback_server(server_sock, creds, alpn: self.class::ALPN, transport_params: nil)
+    QUIC::Connection::Server.accept(
+      sock: server_sock,
+      certificate_path: creds.certificate_path,
+      private_key_path: creds.private_key_path,
+      transport_params: transport_params,
+      settings: QUIC::Settings.default.with(alpn: alpn)
+    )
+  end
+
+  # A Client verifying the test CA, bound to a connected socket, with the
+  # handshake done.
+  def connect_loopback_client(port, creds, alpn: self.class::ALPN)
+    client = QUIC::Connection::Client.new(
+      host: "127.0.0.1", port: port, address_family: :inet,
+      settings: QUIC::Settings.default.with(alpn: alpn, ca_file: creds.ca_file)
+    )
+    sock = UDPSocket.new(Socket::AF_INET)
+    sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)
+    client.bind(sock).run
+    [client, sock]
+  end
+
+  # Stream#write waits until the whole payload fits in the peer's window,
+  # which can be smaller than the payload, so write it piece by piece. FIN
+  # goes with the last piece.
+  def write_in_chunks(stream, data, chunk_size: 64 * 1024)
+    offset = 0
+    while offset < data.bytesize
+      piece = data.byteslice(offset, chunk_size)
+      offset += piece.bytesize
+      stream.write(piece, fin: offset >= data.bytesize)
+    end
+  end
+end
 
 module TestCertificates
   LoopbackCredentials = Data.define(:ca_file, :certificate_path, :private_key_path)

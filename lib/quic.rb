@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "quic/version"
+require_relative "quic/ext_include"
 
 module QUIC
   class Error < StandardError

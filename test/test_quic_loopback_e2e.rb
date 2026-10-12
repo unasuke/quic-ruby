@@ -8,9 +8,9 @@ require "socket"
 # always runs. Pumping both ends from one thread would deadlock.
 class TestQUICLoopbackE2E < Minitest::Test
   include TestCertificates
+  include TestLoopback
 
   ALPN = ["perf"].freeze
-  JOIN_TIMEOUT = 15
 
   def test_echo_round_trip_small_payload
     echo_round_trip("hello quic loopback\n")
@@ -69,6 +69,7 @@ class TestQUICLoopbackE2E < Minitest::Test
     server_sock, port = bind_server_socket
     server_thread = start_server_thread do
       server = accept_loopback_server(server_sock, creds)
+      server.run
       stream = server.accept_stream(timeout: 10)
       raise "no stream accepted within 10 seconds" if stream.nil?
       write_in_chunks(stream, stream.read)
@@ -103,6 +104,7 @@ class TestQUICLoopbackE2E < Minitest::Test
         server_sock, creds,
         transport_params: QUIC::TransportParams.default.with(initial_max_streams_bidi: 4)
       )
+      server.run
       10.times do
         stream = server.accept_stream(timeout: 10)
         raise "no stream accepted within 10 seconds" if stream.nil?
@@ -185,6 +187,7 @@ class TestQUICLoopbackE2E < Minitest::Test
     server_sock, port = bind_server_socket
     server_thread = start_server_thread do
       server = accept_loopback_server(server_sock, creds)
+      server.run
       stream = server.open_bidi_stream
       stream.write("from the server", fin: true)
       begin
@@ -207,43 +210,6 @@ class TestQUICLoopbackE2E < Minitest::Test
   end
 
   private
-
-  def accept_loopback_server(server_sock, creds, transport_params: nil)
-    server = QUIC::Connection::Server.accept(
-      sock: server_sock,
-      certificate_path: creds.certificate_path,
-      private_key_path: creds.private_key_path,
-      transport_params: transport_params,
-      settings: QUIC::Settings.default.with(alpn: ALPN)
-    )
-    server.run
-    server
-  end
-
-  # A Client verifying the test CA, bound to a connected socket, with the
-  # handshake done.
-  def connect_loopback_client(port, creds)
-    client = QUIC::Connection::Client.new(
-      host: "127.0.0.1", port: port, address_family: :inet,
-      settings: QUIC::Settings.default.with(alpn: ALPN, ca_file: creds.ca_file)
-    )
-    sock = UDPSocket.new(Socket::AF_INET)
-    sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)
-    client.bind(sock).run
-    [client, sock]
-  end
-
-  # Stream#write waits until the whole payload fits in the peer's window,
-  # which is smaller than the payloads here, so write them piece by piece.
-  # FIN goes with the last piece.
-  def write_in_chunks(stream, data, chunk_size: 64 * 1024)
-    offset = 0
-    while offset < data.bytesize
-      piece = data.byteslice(offset, chunk_size)
-      offset += piece.bytesize
-      stream.write(piece, fin: offset >= data.bytesize)
-    end
-  end
 
   # open_bidi_stream raises while the peer's stream limit is used up. Pump
   # until the peer raises it (MAX_STREAMS), for up to timeout seconds.
@@ -302,37 +268,5 @@ class TestQUICLoopbackE2E < Minitest::Test
     sock&.close
     server_sock&.close
     stop_server(server_thread)
-  end
-
-  def bind_server_socket
-    sock = UDPSocket.new(Socket::AF_INET)
-    sock.bind("127.0.0.1", 0)
-    [sock, sock.addr[1]]
-  end
-
-  # Exceptions in the thread are collected by #finish_server rather than
-  # reported when the thread dies.
-  def start_server_thread
-    Thread.new do
-      Thread.current.report_on_exception = false
-      yield
-    end
-  end
-
-  # Wait for the server thread and return its value. Thread#join re-raises
-  # whatever the thread raised.
-  def finish_server(thread)
-    flunk "server thread did not finish within #{JOIN_TIMEOUT} seconds" unless thread.join(JOIN_TIMEOUT)
-    thread.value
-  end
-
-  # Cleanup after the sockets are closed. A server still blocked in
-  # Server.accept (no datagram arrived) or in the I/O loop gets IOError from
-  # the closed socket and ends. What it raised was either examined already
-  # or is not the reason the test failed.
-  def stop_server(thread)
-    thread&.join(JOIN_TIMEOUT)
-  rescue
-    nil
   end
 end

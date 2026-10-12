@@ -70,6 +70,7 @@ quic_conn_mark(void *ptr)
 {
   quic_conn_t *c = (quic_conn_t *)ptr;
   rb_gc_mark_movable(c->pending_exc);
+  rb_gc_mark_movable(c->handler_owner);
 }
 
 /* GC.compact may relocate the owner connection object. Follow it so the
@@ -82,6 +83,7 @@ quic_conn_compact(void *ptr)
   quic_conn_t *c = (quic_conn_t *)ptr;
   c->owner = rb_gc_location(c->owner);
   c->pending_exc = rb_gc_location(c->pending_exc);
+  c->handler_owner = rb_gc_location(c->handler_owner);
 }
 
 const rb_data_type_t quic_conn_data_type = {
@@ -97,6 +99,7 @@ quic_conn_alloc(VALUE klass)
   quic_conn_t *c = ALLOC(quic_conn_t);
   memset(c, 0, sizeof(*c));
   c->pending_exc = Qnil;
+  c->handler_owner = Qnil;
   return TypedData_Wrap_Struct(klass, &quic_conn_data_type, c);
 }
 
@@ -358,6 +361,7 @@ quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
 {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler) return 0;  /* the handler keeps its own stream state */
   struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id};
   return quic_conn_protect(c, quic_stream_open_body, &a);
 }
@@ -399,10 +403,26 @@ quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                          uint64_t offset, const uint8_t *data, size_t datalen,
                          void *user_data, void *stream_user_data)
 {
-  (void)conn;
   (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler) {
+    size_t consumed = 0;
+    int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
+    if (c->handler->recv_stream_data(c->handler_ud, stream_id, data, datalen, fin,
+                                     c->now, &consumed) < 0) {
+      return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    /* What the handler consumed outright (for HTTP/3, everything but the
+       request body) goes straight back to the peer as credit. */
+    if (consumed > 0) {
+      if (ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed) != 0) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+      }
+      ngtcp2_conn_extend_max_offset(conn, consumed);
+    }
+    return 0;
+  }
   struct quic_stream_cb_args a = {
     .c = c, .stream_id = stream_id, .flags = flags, .data = data, .datalen = datalen,
   };
@@ -447,6 +467,10 @@ quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
   (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler) {
+    return c->handler->acked_stream_data(c->handler_ud, stream_id, datalen) < 0
+      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+  }
   struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .acked = datalen};
   return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
 }
@@ -488,9 +512,16 @@ quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                      uint64_t app_error_code, void *user_data,
                      void *stream_user_data)
 {
-  (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler) {
+    /* The handler keeps no stream waiting for the application, so the peer
+       gets its stream back at once. */
+    quic_conn_give_back_peer_stream(conn, stream_id);
+    int has_code = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) != 0;
+    return c->handler->stream_close(c->handler_ud, stream_id, has_code, app_error_code) < 0
+      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+  }
   struct quic_stream_cb_args a = {
     .c = c, .stream_id = stream_id, .flags = flags, .app_error_code = app_error_code,
   };
@@ -518,11 +549,65 @@ quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
                      void *stream_user_data)
 {
   (void)conn;
-  (void)final_size;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler) {
+    return c->handler->stream_reset(c->handler_ud, stream_id, final_size, app_error_code) < 0
+      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+  }
   struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .app_error_code = app_error_code};
   return quic_conn_protect(c, quic_stream_reset_body, &a);
+}
+
+/* The callbacks below matter only to a stream handler. Without one, the
+   QUIC::Stream mode needs none of them. */
+
+static int
+quic_stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
+                            uint64_t app_error_code, void *user_data,
+                            void *stream_user_data)
+{
+  (void)conn;
+  (void)stream_user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (!c->handler) return 0;
+  return c->handler->stream_stop_sending(c->handler_ud, stream_id, app_error_code) < 0
+    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+}
+
+static int
+quic_extend_max_stream_data_cb(ngtcp2_conn *conn, int64_t stream_id,
+                               uint64_t max_data, void *user_data,
+                               void *stream_user_data)
+{
+  (void)conn;
+  (void)max_data;
+  (void)stream_user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (!c->handler) return 0;
+  return c->handler->extend_max_stream_data(c->handler_ud, stream_id) < 0
+    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+}
+
+static int
+quic_extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn, uint64_t max_streams,
+                                       void *user_data)
+{
+  (void)conn;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (!c->handler) return 0;
+  return c->handler->extend_max_remote_streams_bidi(c->handler_ud, max_streams) < 0
+    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+}
+
+static int
+quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
+{
+  (void)conn;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (!c->handler) return 0;
+  return c->handler->handshake_completed(c->handler_ud) < 0
+    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
 }
 
 void
@@ -545,6 +630,10 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
   callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
   callbacks->stream_close = quic_stream_close_cb;
   callbacks->stream_reset = quic_stream_reset_cb;
+  callbacks->stream_stop_sending = quic_stream_stop_sending_cb;
+  callbacks->extend_max_stream_data = quic_extend_max_stream_data_cb;
+  callbacks->extend_max_remote_streams_bidi = quic_extend_max_remote_streams_bidi_cb;
+  callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
 /* Find the first stream in @streams that has either pending bytes or a
@@ -613,6 +702,118 @@ quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
   return Qnil;
 }
 
+/* #write_pkt for the QUIC::Stream mode. If any stream has pending bytes or
+   a pending FIN, route the packet through ngtcp2_conn_writev_stream so the
+   stream data gets framed alongside connection-level frames. Falls back to
+   conn-only when no stream is queued. Returns what ngtcp2 returned. */
+static ngtcp2_ssize
+quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
+                            ngtcp2_pkt_info *pi, uint8_t *dest, size_t destlen)
+{
+  ngtcp2_vec datav;
+  size_t datavcnt = 0;
+  uint32_t writev_flags = 0;
+  int64_t send_stream_id = -1;
+  VALUE selected_stream = quic_conn_pick_send_stream(
+    self, &datav, &datavcnt, &writev_flags, &send_stream_id);
+
+  ngtcp2_ssize pdatalen = -1;
+  ngtcp2_ssize n = ngtcp2_conn_writev_stream(
+    c->conn, path, pi, dest, destlen, &pdatalen,
+    writev_flags, send_stream_id, &datav, datavcnt, c->now);
+
+  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
+    /* The stream's queued data is beyond what the peer's flow control lets
+       through right now. Keep it queued and build the packet without it, so
+       that ACKs and other frames still go out; the data follows once the
+       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
+    selected_stream = Qnil;
+    datavcnt = 0;
+    writev_flags = 0;
+    pdatalen = -1;
+    n = ngtcp2_conn_writev_stream(c->conn, path, pi, dest, destlen, &pdatalen,
+                                  0, -1, NULL, 0, c->now);
+  }
+
+  if (n < 0 || !NIL_P(c->pending_exc)) return n;
+
+  /* Update the selected stream's accounting only when we actually sent
+     bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
+     packet; if 0, no data was framed (but the packet may still contain ACK
+     or other frames). */
+  if (!NIL_P(selected_stream) && pdatalen > 0) {
+    quic_stream_t *s;
+    TypedData_Get_Struct(selected_stream, quic_stream_t,
+                         &quic_stream_data_type, s);
+    s->sent_offset += (uint64_t)pdatalen;
+    /* FIN is only actually written when all requested data fits in the
+       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
+    if ((writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN) &&
+        (size_t)pdatalen == datav.len) {
+      s->fin_flushed = true;
+    }
+  } else if (!NIL_P(selected_stream) && datavcnt == 0 && n > 0 &&
+             (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
+    /* FIN-only packet (no data) was successfully written. */
+    quic_stream_t *s;
+    TypedData_Get_Struct(selected_stream, quic_stream_t,
+                         &quic_stream_data_type, s);
+    s->fin_flushed = true;
+  }
+  return n;
+}
+
+/* The number of vectors #write_pkt asks a stream handler for per packet. */
+#define QUIC_HANDLER_VECCNT 16
+
+_Static_assert(sizeof(quic_ext_vec) == sizeof(ngtcp2_vec),
+               "quic_ext_vec must have the layout of ngtcp2_vec");
+_Static_assert(offsetof(quic_ext_vec, base) == offsetof(ngtcp2_vec, base),
+               "quic_ext_vec.base must line up with ngtcp2_vec.base");
+_Static_assert(offsetof(quic_ext_vec, len) == offsetof(ngtcp2_vec, len),
+               "quic_ext_vec.len must line up with ngtcp2_vec.len");
+
+/* #write_pkt with a stream handler: pull the next stream data from the
+   handler for every packet, as ngtcp2's examples/server.cc does with
+   nghttp3. NGTCP2_WRITE_STREAM_FLAG_MORE is not used, so a packet carries
+   data of one stream at most. A handler failure is reported as
+   NGTCP2_ERR_CALLBACK_FAILURE. */
+static ngtcp2_ssize
+quic_conn_write_pkt_handler(quic_conn_t *c, ngtcp2_path *path, ngtcp2_pkt_info *pi,
+                            uint8_t *dest, size_t destlen)
+{
+  const quic_ext_stream_handler *h = c->handler;
+  for (;;) {
+    int64_t sid = -1;
+    int fin = 0;
+    quic_ext_vec vec[QUIC_HANDLER_VECCNT];
+    size_t nvec = 0;
+    if (ngtcp2_conn_get_max_data_left2(c->conn) &&
+        h->next_stream_data(c->handler_ud, &sid, &fin, vec, QUIC_HANDLER_VECCNT, &nvec) < 0) {
+      return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+
+    ngtcp2_ssize ndatalen = -1;
+    ngtcp2_ssize n = ngtcp2_conn_writev_stream(
+      c->conn, path, pi, dest, destlen, &ndatalen,
+      fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0, sid,
+      (const ngtcp2_vec *)vec, nvec, c->now);
+    if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
+      if (h->stream_blocked(c->handler_ud, sid) < 0) return NGTCP2_ERR_CALLBACK_FAILURE;
+      continue;
+    }
+    if (n == NGTCP2_ERR_STREAM_SHUT_WR) {
+      if (h->stream_shut_write(c->handler_ud, sid) < 0) return NGTCP2_ERR_CALLBACK_FAILURE;
+      continue;
+    }
+    if (n < 0) return n;
+    if (ndatalen >= 0 && h->stream_data_written(c->handler_ud, sid, (size_t)ndatalen) < 0) {
+      return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    return n;  /* 0: nothing to send */
+  }
+}
+
 static VALUE
 quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
 {
@@ -644,35 +845,10 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
   uint8_t *dest = (uint8_t *)RSTRING_PTR(buffer);
   size_t destlen = (size_t)QUIC_WRITE_PKT_BUFLEN;
 
-  /* Stream-aware path: if any stream has pending bytes or a pending FIN,
-     route the packet through ngtcp2_conn_writev_stream so the stream data
-     gets framed alongside connection-level frames. Falls back to conn-only
-     when no stream is queued. */
-  ngtcp2_vec datav;
-  size_t datavcnt = 0;
-  uint32_t writev_flags = 0;
-  int64_t send_stream_id = -1;
-  VALUE selected_stream = quic_conn_pick_send_stream(
-    self, &datav, &datavcnt, &writev_flags, &send_stream_id);
-
-  ngtcp2_ssize pdatalen = -1;
-  ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-    c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
-    writev_flags, send_stream_id, &datav, datavcnt, quic_now());
-
-  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
-    /* The stream's queued data is beyond what the peer's flow control lets
-       through right now. Keep it queued and build the packet without it, so
-       that ACKs and other frames still go out; the data follows once the
-       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
-    selected_stream = Qnil;
-    datavcnt = 0;
-    writev_flags = 0;
-    pdatalen = -1;
-    n = ngtcp2_conn_writev_stream(
-      c->conn, &path_storage.path, &pi, dest, destlen, &pdatalen,
-      0, -1, NULL, 0, quic_now());
-  }
+  c->now = quic_now();
+  ngtcp2_ssize n = c->handler
+    ? quic_conn_write_pkt_handler(c, &path_storage.path, &pi, dest, destlen)
+    : quic_conn_write_pkt_streams(self, c, &path_storage.path, &pi, dest, destlen);
 
   if (!NIL_P(c->pending_exc)) {
     rb_str_set_len(buffer, 0);
@@ -684,30 +860,6 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
        that a rescued caller cannot accidentally transmit stale bytes. */
     rb_str_set_len(buffer, 0);
     quic_raise_ngtcp2_error((int)n);
-  }
-
-  /* Update the selected stream's accounting only when we actually sent
-     bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
-     packet; if 0, no data was framed (but the packet may still contain ACK
-     or other frames). */
-  if (!NIL_P(selected_stream) && pdatalen > 0) {
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
-    s->sent_offset += (uint64_t)pdatalen;
-    /* FIN is only actually written when all requested data fits in the
-       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
-    if ((writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN) &&
-        (size_t)pdatalen == datav.len) {
-      s->fin_flushed = true;
-    }
-  } else if (!NIL_P(selected_stream) && datavcnt == 0 && n > 0 &&
-             (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
-    /* FIN-only packet (no data) was successfully written. */
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
-    s->fin_flushed = true;
   }
 
   if (n == 0) {
@@ -760,10 +912,11 @@ static VALUE
 quic_read_pkt_body(VALUE arg)
 {
   struct quic_read_pkt_args *a = (struct quic_read_pkt_args *)arg;
+  a->c->now = quic_now();
   int rv = ngtcp2_conn_read_pkt(a->c->conn, &a->path, &a->pi,
                                 (const uint8_t *)RSTRING_PTR(a->packet),
                                 (size_t)RSTRING_LEN(a->packet),
-                                quic_now());
+                                a->c->now);
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
     /* NORETURN: longjmp passes through rb_ensure so unlock still fires. */
@@ -854,16 +1007,27 @@ static VALUE
 quic_conn_handle_expiry(VALUE self)
 {
   quic_conn_t *c = quic_conn_get(self);
-  int rv = ngtcp2_conn_handle_expiry(c->conn, quic_now());
+  c->now = quic_now();
+  int rv = ngtcp2_conn_handle_expiry(c->conn, c->now);
   quic_conn_raise_pending(c);
   if (rv != 0) quic_raise_ngtcp2_error(rv);
   return Qnil;
+}
+
+/* QUIC::Stream objects exist only without a stream handler. */
+static void
+quic_conn_require_stream_mode(quic_conn_t *c)
+{
+  if (c->handler) {
+    rb_raise(rb_eQUICErrorInvalidState, "the connection's streams belong to a C stream handler");
+  }
 }
 
 static VALUE
 quic_conn_open_bidi_stream(VALUE self)
 {
   quic_conn_t *c = quic_conn_get(self);
+  quic_conn_require_stream_mode(c);
 
   int64_t stream_id;
   int rv = ngtcp2_conn_open_bidi_stream(c->conn, &stream_id, NULL);
@@ -879,6 +1043,7 @@ static VALUE
 quic_conn_open_uni_stream(VALUE self)
 {
   quic_conn_t *c = quic_conn_get(self);
+  quic_conn_require_stream_mode(c);
 
   int64_t stream_id;
   int rv = ngtcp2_conn_open_uni_stream(c->conn, &stream_id, NULL);

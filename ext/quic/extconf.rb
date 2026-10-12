@@ -164,4 +164,8 @@ append_cflags("-DQUIC_PICOTLS_COMMIT=\\\"#{PICOTLS_COMMIT}\\\"")
 append_cflags("-fvisibility=hidden")
 append_ldflags("-Wl,--exclude-libs,ALL")  # Unexport symbols from statically linked libraries
 
+# quic/ext.h, the C function table other extensions (the http3 gem) build
+# against. It ships in the gem; QUIC::EXT_INCLUDE_DIR points them here.
+append_cppflags("-I#{File.expand_path("include", __dir__)}")
+
 create_makefile("quic/quic")

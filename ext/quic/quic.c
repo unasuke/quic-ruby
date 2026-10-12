@@ -1,5 +1,6 @@
 #include "quic.h"
 #include "stream.h"
+#include "connection_common.h"
 
 VALUE rb_mQUIC;
 VALUE rb_mQUICConnection;
@@ -21,6 +22,17 @@ VALUE rb_eQUICErrorWaitWritable;
 VALUE rb_eQUICErrorStreamClosed;
 VALUE rb_eQUICErrorStreamReset;
 VALUE rb_eQUICErrorNotBound;
+VALUE rb_eQUICErrorInvalidState;
+
+/* The one symbol besides Init_quic that quic.so exports: other extensions
+   look it up with rb_ext_resolve_symbol("quic/quic", "quic_ext_get_api")
+   and get the C function table declared in quic/ext.h. NULL means the
+   caller was built against an incompatible major version. */
+RUBY_FUNC_EXPORTED const quic_ext_api *
+quic_ext_get_api(uint32_t abi_major)
+{
+  return abi_major == QUIC_EXT_ABI_MAJOR ? &quic_ext_api_table : NULL;
+}
 
 static VALUE
 quic_library_versions(VALUE self)
@@ -121,6 +133,9 @@ Init_quic(void)
   rb_eQUICErrorStreamClosed = rb_define_class_under(rb_eQUICError, "StreamClosed", rb_eQUICError);
   rb_eQUICErrorStreamReset = rb_define_class_under(rb_eQUICError, "StreamReset", rb_eQUICError);
   rb_eQUICErrorNotBound = rb_define_class_under(rb_eQUICError, "NotBound", rb_eQUICError);
+  /* Raised by the QUIC::Stream methods of a connection whose streams a C
+     stream handler (quic/ext.h) owns. */
+  rb_eQUICErrorInvalidState = rb_define_class_under(rb_eQUICError, "InvalidState", rb_eQUICError);
 
   Init_quic_connection_client(rb_mQUICConnection);
   Init_quic_connection_server(rb_mQUICConnection);

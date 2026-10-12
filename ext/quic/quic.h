@@ -38,6 +38,7 @@ extern VALUE rb_eQUICErrorWaitWritable;
 extern VALUE rb_eQUICErrorStreamClosed;
 extern VALUE rb_eQUICErrorStreamReset;
 extern VALUE rb_eQUICErrorNotBound;
+extern VALUE rb_eQUICErrorInvalidState;
 
 void Init_quic_connection_client(VALUE rb_mQUICConnection);
 void Init_quic_connection_server(VALUE rb_mQUICConnection);
