@@ -89,6 +89,12 @@ class TestQUIC < Minitest::Test
     assert_equal :peer, settings.verify_mode
     assert_nil settings.ca_file
     assert_nil settings.ca_path
+    assert_nil settings.qlog_dir
+  end
+
+  def test_settings_default_writes_no_qlog
+    assert_nil QUIC::Settings.default.qlog_dir
+    assert_nil QUIC::Settings.default.check_qlog_dir
   end
 
   def test_certificate_verify_failed_is_a_crypto_error

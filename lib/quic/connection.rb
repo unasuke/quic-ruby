@@ -174,13 +174,15 @@ module QUIC
 
         remote_sockaddr = remote_address.to_sockaddr
         local_sockaddr = Addrinfo.udp("0.0.0.0", 0).to_sockaddr
+        settings ||= QUIC::Settings.default
+        settings.check_qlog_dir
 
         client = _open(
           local_sockaddr: local_sockaddr,
           remote_sockaddr: remote_sockaddr,
           server_name: host,
           transport_params: transport_params || QUIC::TransportParams.default,
-          settings: settings || QUIC::Settings.default
+          settings: settings
         )
         client.instance_variable_set(:@host, host)
         client.instance_variable_set(:@port, port)
@@ -212,8 +214,12 @@ module QUIC
       # a new socket. accept never closes sock; its lifetime is the caller's.
       #
       # settings must name at least one ALPN protocol, so the default
-      # (QUIC::Settings.default) raises ArgumentError.
+      # (QUIC::Settings.default) raises ArgumentError. A qlog_dir that is not
+      # a writable directory raises ArgumentError before the wait.
       def self.accept(sock:, certificate_path:, private_key_path:, transport_params: nil, settings: nil)
+        settings ||= QUIC::Settings.default
+        settings.check_qlog_dir
+
         data, sender = sock.recvfrom(2048)
         sock.connect(sender[3], sender[1])
         # Read both addresses back from the connected socket so that the path
@@ -229,7 +235,7 @@ module QUIC
           certificate_path: certificate_path,
           private_key_path: private_key_path,
           transport_params: transport_params || QUIC::TransportParams.default,
-          settings: settings || QUIC::Settings.default
+          settings: settings
         )
         server.instance_variable_set(:@local_sockaddr, local_sockaddr)
         server.instance_variable_set(:@remote_sockaddr, remote_sockaddr)

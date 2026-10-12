@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "pathname"
 require "socket"
 
 # A QUIC::Connection::Server in a thread and a Client in the main thread,
@@ -20,6 +21,33 @@ class TestQUICLoopbackE2E < Minitest::Test
   # control window.
   def test_echo_round_trip_multi_packet_payload
     echo_round_trip(Random.new(42).bytes(100 * 1024))
+  end
+
+  # Each end writes its connection's qlog to <qlog_dir>/<its SCID in
+  # hex>.sqlog. The echo makes far more qlog than stdio buffers, so the
+  # first record has reached the file by the time the connection is done.
+  def test_qlog_dir_gets_a_file_per_connection
+    Dir.mktmpdir do |dir|
+      server_dir = File.join(dir, "server")
+      client_dir = File.join(dir, "client")
+      Dir.mkdir(server_dir)
+      Dir.mkdir(client_dir)
+
+      echo_round_trip(
+        Random.new(3).bytes(64 * 1024),
+        server_settings: {qlog_dir: server_dir},
+        client_settings: {qlog_dir: Pathname(client_dir)}
+      )
+
+      [server_dir, client_dir].each do |qlog_dir|
+        files = Dir.children(qlog_dir)
+        assert_equal 1, files.size, "one qlog file in #{qlog_dir}"
+        assert_match(/\A\h{16}\.sqlog\z/, files.first)
+        qlog = File.binread(File.join(qlog_dir, files.first))
+        assert qlog.start_with?("\x1e".b), "qlog is a JSON text sequence"
+        assert_includes qlog, "qlog_version"
+      end
+    end
   end
 
   # The client connects to 127.0.0.1 but expects example.com, which is not in
@@ -229,7 +257,7 @@ class TestQUICLoopbackE2E < Minitest::Test
   # payload with FIN, and reads the echo up to the server's FIN. The server
   # echoes one stream and pumps until the stream is closed, or until the
   # client's #close ends the connection first.
-  def echo_round_trip(payload)
+  def echo_round_trip(payload, server_settings: {}, client_settings: {})
     creds = loopback_credentials
     server_sock, port = bind_server_socket
     server_thread = start_server_thread do
@@ -237,7 +265,7 @@ class TestQUICLoopbackE2E < Minitest::Test
         sock: server_sock,
         certificate_path: creds.certificate_path,
         private_key_path: creds.private_key_path,
-        settings: QUIC::Settings.default.with(alpn: ALPN)
+        settings: QUIC::Settings.default.with(alpn: ALPN, **server_settings)
       )
       server.run
       stream = server.accept_stream(timeout: 10)
@@ -252,7 +280,7 @@ class TestQUICLoopbackE2E < Minitest::Test
 
     client = QUIC::Connection::Client.new(
       host: "127.0.0.1", port: port, address_family: :inet,
-      settings: QUIC::Settings.default.with(alpn: ALPN, ca_file: creds.ca_file)
+      settings: QUIC::Settings.default.with(alpn: ALPN, ca_file: creds.ca_file, **client_settings)
     )
     sock = UDPSocket.new(Socket::AF_INET)
     sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)

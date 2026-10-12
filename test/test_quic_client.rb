@@ -89,6 +89,28 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  def test_new_raises_on_qlog_dir_that_is_not_a_writable_directory
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, "file").tap { |path| File.write(path, "") }
+      [File.join(dir, "missing"), file].each do |qlog_dir|
+        error = assert_raises(ArgumentError) do
+          QUIC::Connection::Client.new(
+            host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: qlog_dir)
+          )
+        end
+        assert_equal "qlog_dir is not a writable directory: #{qlog_dir}", error.message
+      end
+    end
+  end
+
+  def test_new_opens_a_qlog_file_named_after_its_scid
+    Dir.mktmpdir do |dir|
+      QUIC::Connection::Client.new(host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: dir))
+      assert_equal 1, Dir.children(dir).size
+      assert_match(/\A\h{16}\.sqlog\z/, Dir.children(dir).first)
+    end
+  end
+
   # ngtcp2 copies an address by its length into room for a sockaddr_in6, so
   # only an AF_INET or AF_INET6 sockaddr of its exact size may get through.
   def test_read_pkt_raises_on_anything_but_an_inet_sockaddr

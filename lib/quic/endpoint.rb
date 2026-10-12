@@ -40,12 +40,14 @@ module QUIC
       unless max_connections.is_a?(Integer)
         raise TypeError, "max_connections must be an Integer (got #{max_connections.class})"
       end
+      settings ||= QUIC::Settings.default
+      settings.check_qlog_dir
 
       endpoint = _new(
         local_sockaddr: local_address.to_sockaddr,
         tls_context: tls_context,
         transport_params: transport_params || QUIC::TransportParams.default,
-        settings: settings || QUIC::Settings.default,
+        settings: settings,
         max_connections: max_connections
       )
       endpoint.instance_variable_set(:@local_address, local_address)

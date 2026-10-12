@@ -95,7 +95,18 @@ module QUIC
     attr_reader ca_file: (String | _ToPath)?
     attr_reader ca_path: (String | _ToPath)?
 
+    # Every connection writes its qlog to <qlog_dir>/<its first source
+    # connection ID in hex>.sqlog. nil (the default) writes none. A file
+    # that cannot be opened when a connection is made only costs that
+    # connection's qlog.
+    attr_reader qlog_dir: (String | _ToPath)?
+
     def self.default: () -> Settings
+
+    # Raises ArgumentError unless qlog_dir is nil or a directory this
+    # process can write to. Client.new, Connection::Server.accept and
+    # Endpoint.new call it.
+    def check_qlog_dir: () -> nil
   end
 
   # A server's certificate chain, private key and ALPN protocols (in order

@@ -66,6 +66,7 @@ quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
 
   ngtcp2_settings settings;
   quic_fill_settings(&settings, settings_v);
+  quic_conn_open_qlog(c, settings_v, &settings);
 
   c->conn_ref.get_conn = quic_conn_get_conn;
   c->conn_ref.user_data = c;

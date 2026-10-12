@@ -189,6 +189,7 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
 
   ngtcp2_settings settings;
   quic_fill_settings(&settings, settings_v);
+  quic_conn_open_qlog(c, settings_v, &settings);
 
   ngtcp2_transport_params params;
   quic_fill_transport_params(&params, transport_params);

@@ -47,6 +47,8 @@ quic_conn_free(void *ptr)
      the shared context on a server. */
   if (c->verify_cert_initialized) ptls_openssl_dispose_verify_certificate(&c->verify_cert);
   if (c->tls != NULL) quic_tls_ctx_unref(c->tls);
+  /* Still open only when no ngtcp2_conn was made to finish it. */
+  if (c->qlog != NULL) fclose(c->qlog);
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);
@@ -285,6 +287,36 @@ quic_fill_settings(ngtcp2_settings *settings, VALUE st)
     (ngtcp2_duration)quic_get_uint64_field(st, "handshake_timeout");
   VALUE no_pmtud = rb_funcall(st, rb_intern("no_pmtud"), 0);
   settings->no_pmtud = RTEST(no_pmtud) ? 1 : 0;
+}
+
+/* ngtcp2_settings.qlog_write. Touches no Ruby object, so it needs no
+   rb_protect. A write error only costs qlog. */
+static void
+quic_qlog_write_cb(void *user_data, uint32_t flags, const void *data, size_t datalen)
+{
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->qlog == NULL) return;
+  fwrite(data, 1, datalen, c->qlog);
+  if (flags & NGTCP2_QLOG_WRITE_FLAG_FIN) {
+    fclose(c->qlog);
+    c->qlog = NULL;
+  }
+}
+
+void
+quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v, ngtcp2_settings *settings)
+{
+  VALUE dir = quic_path_value(rb_funcall(settings_v, rb_intern("qlog_dir"), 0), "qlog_dir");
+  if (NIL_P(dir)) return;
+
+  char hex[NGTCP2_MAX_CIDLEN * 2 + 1];
+  for (size_t i = 0; i < c->scid.datalen; i++) {
+    snprintf(hex + i * 2, 3, "%02x", c->scid.data[i]);
+  }
+  hex[c->scid.datalen * 2] = '\0';
+  VALUE path = rb_sprintf("%"PRIsVALUE"/%s.sqlog", dir, hex);
+  c->qlog = fopen(StringValueCStr(path), "w");
+  if (c->qlog != NULL) settings->qlog_write = quic_qlog_write_cb;
 }
 
 /* Validate a path setting (ca_file, ca_path, ...) and return it as a String,
