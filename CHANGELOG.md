@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.0.3] - 2026-10-13
 
 ### Added
 - `QUIC::Connection::Server` serves a single connection per UDP socket. `Server.accept(sock:, certificate_path:, private_key_path:, transport_params: nil, settings: nil)` waits for the first datagram, connects the socket to its sender and returns a Server whose handshake `#run` completes; streams, `#accept_stream` and `#close` then work as on a Client. The certificate file is PEM, leaf first, and `settings` must name at least one ALPN protocol; `verify_mode`, `ca_file` and `ca_path` are ignored, since no client certificate is requested. A certificate or key that cannot be loaded or used, or an empty ALPN list, raises `ArgumentError`; a first datagram that cannot start a connection raises `QUIC::Error::Proto`. There is no Retry, address validation or Version Negotiation, and `Server.new` is private. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
