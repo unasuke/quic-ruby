@@ -56,6 +56,11 @@ typedef struct {
      (no dmark needed). GC.compact may relocate owner, so quic_conn_compact
      updates this field via rb_gc_location. */
   VALUE owner;
+  /* An exception raised by Ruby code inside an ngtcp2 callback, caught with
+     rb_protect so that it does not unwind through ngtcp2's frames. #read_pkt,
+     #write_pkt and #handle_expiry re-raise it once ngtcp2 has returned.
+     Qnil when there is none. Marked by quic_conn_data_type's dmark. */
+  VALUE pending_exc;
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
@@ -66,7 +71,8 @@ extern const rb_data_type_t quic_conn_data_type;
 extern ptls_key_exchange_algorithm_t *quic_key_exchanges[];
 extern ptls_cipher_suite_t *quic_cipher_suites[];
 
-/* Allocator for both connection classes. The struct starts zeroed. */
+/* Allocator for both connection classes. The struct starts zeroed, except
+   pending_exc, which starts as Qnil. */
 VALUE quic_conn_alloc(VALUE klass);
 
 quic_conn_t *quic_conn_get(VALUE self);
@@ -90,6 +96,12 @@ VALUE quic_path_value(VALUE value, const char *name);
 /* Copy settings.alpn into memory owned by c (c->alpn / c->alpn_buf). An
    empty list leaves c->alpn_count at 0. */
 void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v);
+
+/* Give the peer back the stream stream_id used up, if it is a
+   bidirectional stream the peer opened, as ngtcp2's examples/server.cc
+   does when such a stream closes. Without this the peer can open only
+   initial_max_streams_bidi streams over the whole connection. */
+void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id);
 
 void quic_fill_transport_params(ngtcp2_transport_params *params, VALUE tp);
 void quic_fill_settings(ngtcp2_settings *settings, VALUE st);

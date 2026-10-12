@@ -9,6 +9,12 @@
 - `#accept_stream_nonblock` now raises `QUIC::Error::WaitReadable` with "no peer-initiated stream available" (was "no server-initiated stream available"), as it serves `QUIC::Connection::Server` too. ([#9](https://github.com/unasuke/quic-ruby/pull/9))
 - picotls's `lib/pembase64.c`, a PEM loader nothing uses, is no longer built at install time, so every picotls source compiled into the gem is MIT licensed. ([#10](https://github.com/unasuke/quic-ruby/pull/10))
 
+### Fixed
+- `QUIC::Stream#read` and `#read_nonblock` give the peer flow control credit back for what they hand to the application. Before, a connection stopped receiving once `initial_max_data` (1 MiB by default) had been used up. ([#11](https://github.com/unasuke/quic-ruby/pull/11))
+- When a stream the peer opened closes, the peer may open another one. Before, it could open only `initial_max_streams_bidi` bidirectional streams over the whole connection. A stream that closes while it waits for `#accept_stream` is given back only once it has been accepted, so that the streams waiting there stay within that limit. ([#11](https://github.com/unasuke/quic-ruby/pull/11))
+- An exception raised by Ruby code inside an ngtcp2 callback (for example a `FrozenError`) comes out of `#read_pkt`, `#write_pkt` or `#handle_expiry` instead of unwinding through ngtcp2. ([#11](https://github.com/unasuke/quic-ruby/pull/11))
+- `QUIC::Stream#write` and `#write_nonblock` count the bytes already queued but not yet sent against the peer's window, and `#write_pkt` no longer raises `QUIC::Error::FlowControl` when that window is full; the data waits until the peer extends it. ([#11](https://github.com/unasuke/quic-ruby/pull/11))
+
 ## [0.0.2] - 2026-09-27
 
 ### Added

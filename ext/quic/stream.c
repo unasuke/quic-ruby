@@ -97,15 +97,28 @@ quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data)
   return RTEST(fin);
 }
 
-/* Return the effective send window for this stream, capped by both the
-   per-stream and the per-connection flow control limits ngtcp2 tracks. */
+/* Return the effective send window for this stream: the smaller of the
+   per-stream and the per-connection flow control limits ngtcp2 tracks, less
+   the bytes already queued in @pending_chunks but not yet handed to ngtcp2.
+   ngtcp2 only counts what it has sent, so without the subtraction a run of
+   writes could queue far more than the peer allows. */
 static uint64_t
-quic_stream_window_left(VALUE client_v, quic_stream_t *s)
+quic_stream_window_left(VALUE self, VALUE client_v, quic_stream_t *s)
 {
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
   uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
   uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
-  return stream_left < conn_left ? stream_left : conn_left;
+  uint64_t left = stream_left < conn_left ? stream_left : conn_left;
+
+  /* @pending_chunks starts at stream offset pending_shifted, and the bytes
+     up to sent_offset have been sent. */
+  VALUE pending = rb_ivar_get(self, rb_intern("@pending_chunks"));
+  uint64_t queued_end = s->pending_shifted;
+  for (long i = 0; i < RARRAY_LEN(pending); i++) {
+    queued_end += (uint64_t)RSTRING_LEN(RARRAY_AREF(pending, i));
+  }
+  uint64_t unsent = queued_end - s->sent_offset;
+  return left > unsent ? left - unsent : 0;
 }
 
 /* Blocking write: block by repeatedly invoking #pump_once on the owning
@@ -135,7 +148,7 @@ quic_stream_write_m(int argc, VALUE *argv, VALUE self)
     /* Loop until the full payload would fit in the current window. pump_once
        raises QUIC::Error::NotBound if the connection has not been #bind'ed;
        that error surfaces verbatim. */
-    while ((uint64_t)needed > quic_stream_window_left(client_v, s)) {
+    while ((uint64_t)needed > quic_stream_window_left(self, client_v, s)) {
       rb_funcall(client_v, rb_intern("pump_once"), 0);
     }
   }
@@ -170,7 +183,7 @@ quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self)
 
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
-  uint64_t avail = quic_stream_window_left(client_v, s);
+  uint64_t avail = quic_stream_window_left(self, client_v, s);
 
   if (avail == 0) {
     rb_raise(rb_eQUICErrorWaitWritable, "stream send window is full");
@@ -231,6 +244,19 @@ quic_stream_read_nonblock_m(VALUE self, VALUE length_v)
     memmove(RSTRING_PTR(buffer), RSTRING_PTR(buffer) + take, (size_t)(have - take));
   }
   rb_str_set_len(buffer, have - take);
+
+  /* The application has consumed |take| bytes, so give the peer that much
+     more stream and connection credit. Without this the peer stops sending
+     once initial_max_data / initial_max_stream_data are used up. A stream
+     ngtcp2 has already forgotten is ignored (the call returns 0), but the
+     connection window still grows. Bare Streams have no connection. */
+  VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
+  if (!NIL_P(client_v)) {
+    ngtcp2_conn *conn = quic_conn_ptr(client_v);
+    int rv = ngtcp2_conn_extend_max_stream_offset(conn, s->stream_id, (uint64_t)take);
+    if (rv != 0) quic_raise_ngtcp2_error(rv);
+    ngtcp2_conn_extend_max_offset(conn, (uint64_t)take);
+  }
 
   return out;
 }
@@ -317,6 +343,25 @@ quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
   return Qnil;
 }
 
+/* Called by #accept_stream / #accept_stream_nonblock for the stream they
+   take off @accept_queue. A stream that closed while it waited there gives
+   the peer back the stream it used up now (see quic_stream_close_body). */
+static VALUE
+quic_stream_accepted_m(VALUE self)
+{
+  quic_stream_t *s;
+  TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
+  s->accepted = true;
+  if (s->peer_stream_held) {
+    s->peer_stream_held = false;
+    VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
+    if (!NIL_P(client_v)) {
+      quic_conn_give_back_peer_stream(quic_conn_ptr(client_v), s->stream_id);
+    }
+  }
+  return Qnil;
+}
+
 void
 Init_quic_stream(VALUE rb_mQUICArg)
 {
@@ -331,5 +376,6 @@ Init_quic_stream(VALUE rb_mQUICArg)
   rb_define_method(rb_cQUICStream, "close_read", quic_stream_close_read_m, 0);
   rb_define_method(rb_cQUICStream, "close", quic_stream_close_m, 0);
   rb_define_method(rb_cQUICStream, "reset", quic_stream_reset_m, -1);
+  rb_define_private_method(rb_cQUICStream, "_accepted", quic_stream_accepted_m, 0);
   /* #read (blocking) and #initiator are defined in lib/quic/stream.rb. */
 }
