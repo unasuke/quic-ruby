@@ -43,15 +43,10 @@ quic_conn_free(void *ptr)
     ngtcp2_crypto_picotls_deconfigure_session(&c->cptls);
     ptls_free(c->cptls.ptls);
   }
-  /* After ptls_free: the ptls_t references verify_cert, sign_cert and the
-     certificate list through tls_ctx. */
+  /* After ptls_free: the ptls_t references verify_cert through tls_ctx, or
+     the shared context on a server. */
   if (c->verify_cert_initialized) ptls_openssl_dispose_verify_certificate(&c->verify_cert);
-  if (c->sign_cert_initialized) ptls_openssl_dispose_sign_certificate(&c->sign_cert);
-  /* picotls malloc()ed the list and each entry, so free(), not xfree(). */
-  if (c->tls_ctx.certificates.list != NULL) {
-    for (size_t i = 0; i < c->tls_ctx.certificates.count; i++) free(c->tls_ctx.certificates.list[i].base);
-    free(c->tls_ctx.certificates.list);
-  }
+  if (c->tls != NULL) quic_tls_ctx_unref(c->tls);
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);
@@ -272,15 +267,14 @@ quic_path_value(VALUE value, const char *name)
   return path;
 }
 
-/* Copy the ALPN list into memory owned by c: picotls keeps the pointers for
-   the whole handshake, so ALLOCA_N would not survive. An empty list leaves
-   c->alpn NULL, which a client sends as no ALPN extension at all. */
+/* picotls keeps the pointers of an ALPN list for the whole handshake, so
+   ALLOCA_N would not survive. */
 void
-quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
+quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf)
 {
-  VALUE alpn_ary = rb_funcall(settings_v, rb_intern("alpn"), 0);
   Check_Type(alpn_ary, T_ARRAY);
   long n_alpn = RARRAY_LEN(alpn_ary);
+  *count = 0;
   if (n_alpn <= 0) return;
 
   size_t total = 0;
@@ -293,17 +287,26 @@ quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
     }
     total += (size_t)len;
   }
-  c->alpn_buf = ALLOC_N(uint8_t, total);
-  c->alpn = ALLOC_N(ptls_iovec_t, n_alpn);
-  uint8_t *p = c->alpn_buf;
+  *buf = ALLOC_N(uint8_t, total);
+  *list = ALLOC_N(ptls_iovec_t, n_alpn);
+  uint8_t *p = *buf;
   for (long i = 0; i < n_alpn; i++) {
     VALUE entry = RARRAY_AREF(alpn_ary, i);
     size_t len = (size_t)RSTRING_LEN(entry);
     memcpy(p, RSTRING_PTR(entry), len);
-    c->alpn[i] = ptls_iovec_init(p, len);
+    (*list)[i] = ptls_iovec_init(p, len);
     p += len;
   }
-  c->alpn_count = (size_t)n_alpn;
+  *count = (size_t)n_alpn;
+}
+
+/* An empty list leaves c->alpn NULL, which a client sends as no ALPN
+   extension at all. */
+void
+quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
+{
+  quic_copy_alpn(rb_funcall(settings_v, rb_intern("alpn"), 0), &c->alpn, &c->alpn_count,
+                 &c->alpn_buf);
 }
 
 /* Shared helper: look up the QUIC::Stream registered for stream_id in the
