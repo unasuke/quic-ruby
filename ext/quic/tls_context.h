@@ -34,7 +34,8 @@ void Init_quic_tls_context(VALUE rb_mQUICArg);
    holding the one reference to a new context. alpn_ary must be a non-empty
    Array of 1-255 byte Strings. Raises ArgumentError naming what could not
    be loaded or used. */
-VALUE quic_tls_context_server_new(VALUE certificate_path, VALUE private_key_path, VALUE alpn_ary);
+VALUE quic_tls_context_server_new(VALUE certificate_path,
+                                  VALUE private_key_path, VALUE alpn_ary);
 
 /* The context behind a QUIC::TLSContext object. Raises TypeError for any
    other object. */

@@ -38,7 +38,7 @@ typedef struct {
   /* Filled by quic_override_verify_cb during the handshake so that a failed
      read_pkt can raise CertificateVerifyFailed with the X509 error. */
   bool verify_failed;
-  int verify_result;  /* X509_V_ERR_*, 0 when the server sent no certificate */
+  int verify_result; /* X509_V_ERR_*, 0 when the server sent no certificate */
   /* The TLS native handle handed to ngtcp2 (&cptls, not cptls.ptls). */
   ngtcp2_crypto_picotls_ctx cptls;
   /* [0]: QUIC transport params, filled in by ngtcp2; [1]: terminator. */
@@ -130,14 +130,14 @@ ngtcp2_tstamp quic_now(void);
    *path. Returns the packet's length, 0 when there is nothing to send, or a
    negative ngtcp2 error. Never raises for the connection's own failures: an
    exception from a Ruby callback is left in c->pending_exc. */
-ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path,
-                                     uint8_t *dest);
+ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c,
+                                     ngtcp2_path *path, uint8_t *dest);
 
 /* Feed one datagram to the connection, as #read_pkt does, and return what
    ngtcp2_conn_read_pkt returned. Like quic_conn_write_pkt_raw, it leaves an
    exception from a Ruby callback in c->pending_exc. */
-int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
-                           size_t datalen);
+int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path,
+                           const uint8_t *data, size_t datalen);
 
 /* The exception #read_pkt raises for rv, an error ngtcp2_conn_read_pkt
    returned: a CryptoError (or CertificateVerifyFailed) with the TLS alert
@@ -149,8 +149,9 @@ VALUE quic_conn_error_new(quic_conn_t *c, int rv);
    (a QUIC::TLSContext). ep is the Endpoint that will hold it (its object
    ep_owner), or NULL for Server.accept. Raises if ngtcp2 or picotls cannot
    set the connection up. */
-VALUE quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd, const ngtcp2_path *path,
-                           VALUE tls_context, VALUE transport_params, VALUE settings_v,
+VALUE quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd,
+                           const ngtcp2_path *path, VALUE tls_context,
+                           VALUE transport_params, VALUE settings_v,
                            quic_endpoint_t *ep, VALUE ep_owner);
 
 quic_conn_t *quic_conn_get(VALUE self);
@@ -181,7 +182,8 @@ VALUE quic_path_value(VALUE value, const char *name);
    the list's entries point into. Both are stored in *list and *buf as soon
    as they are allocated, for the caller to release with xfree even when
    this raises. An empty Array allocates nothing and sets *count to 0. */
-void quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf);
+void quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count,
+                    uint8_t **buf);
 
 /* Copy settings.alpn into memory owned by c (c->alpn / c->alpn_buf). An
    empty list leaves c->alpn_count at 0. */
@@ -201,7 +203,8 @@ void quic_fill_settings(ngtcp2_settings *settings, VALUE st);
    qlog there. c->scid must be set. A file that cannot be opened only goes
    without qlog: QUIC::Settings#check_qlog_dir already caught a wrong
    directory when the connection or Endpoint was set up. */
-void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v, ngtcp2_settings *settings);
+void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v,
+                         ngtcp2_settings *settings);
 
 /* Zero *callbacks and fill in everything both endpoints share. The caller
    adds the endpoint specific ones (client_initial / recv_retry, or

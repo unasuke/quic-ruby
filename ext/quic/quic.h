@@ -6,16 +6,18 @@
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
-#include <picotls.h>
-#include <picotls/openssl.h>
 #include <ngtcp2/ngtcp2_crypto_picotls.h>
 #include <openssl/crypto.h>
+#include <picotls.h>
+#include <picotls/openssl.h>
 
 /* picotls disables ptls_openssl_x25519 unless it is built with the patch in
    ext/quic/patches/picotls/. extconf.rb checks the same condition at configure
    time; this catches a prebuilt ports/ tree whose patch was swapped out. */
 #if !PTLS_OPENSSL_HAVE_X25519
+/* clang-format off */
 #error "picotls was built without X25519; is ext/quic/patches/picotls/*.patch applied?"
+/* clang-format on */
 #endif
 
 extern VALUE rb_mQUIC;

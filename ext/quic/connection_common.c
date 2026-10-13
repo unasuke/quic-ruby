@@ -13,31 +13,30 @@
    in supported_groups and reached via HelloRetryRequest. X25519 is first so
    the common case stays 1-RTT. */
 ptls_key_exchange_algorithm_t *quic_key_exchanges[] = {
-  &ptls_openssl_x25519,
-  &ptls_openssl_secp256r1,
+    &ptls_openssl_x25519,
+    &ptls_openssl_secp256r1,
 #if PTLS_OPENSSL_HAVE_SECP384R1
-  &ptls_openssl_secp384r1,
+    &ptls_openssl_secp384r1,
 #endif
-  NULL,
+    NULL,
 };
 
 ptls_cipher_suite_t *quic_cipher_suites[] = {
-  &ptls_openssl_aes128gcmsha256,
-  &ptls_openssl_aes256gcmsha384,
+    &ptls_openssl_aes128gcmsha256,
+    &ptls_openssl_aes256gcmsha384,
 #if PTLS_OPENSSL_HAVE_CHACHA20_POLY1305
-  &ptls_openssl_chacha20poly1305sha256,
+    &ptls_openssl_chacha20poly1305sha256,
 #endif
-  NULL,
+    NULL,
 };
 
-static void
-quic_conn_free(void *ptr)
-{
+static void quic_conn_free(void *ptr) {
   quic_conn_t *c = (quic_conn_t *)ptr;
   /* The Endpoint may be swept in the same GC cycle and freed first; nothing
      from here on may reach its CID table. */
   c->endpoint = NULL;
-  if (c->conn) ngtcp2_conn_del(c->conn);
+  if (c->conn)
+    ngtcp2_conn_del(c->conn);
   if (c->cptls.ptls) {
     /* Safe even when configure_client_session never ran or failed midway. */
     ngtcp2_crypto_picotls_deconfigure_session(&c->cptls);
@@ -45,26 +44,25 @@ quic_conn_free(void *ptr)
   }
   /* After ptls_free: the ptls_t references verify_cert through tls_ctx, or
      the shared context on a server. */
-  if (c->verify_cert_initialized) ptls_openssl_dispose_verify_certificate(&c->verify_cert);
-  if (c->tls != NULL) quic_tls_ctx_unref(c->tls);
+  if (c->verify_cert_initialized)
+    ptls_openssl_dispose_verify_certificate(&c->verify_cert);
+  if (c->tls != NULL)
+    quic_tls_ctx_unref(c->tls);
   /* Still open only when no ngtcp2_conn was made to finish it. */
-  if (c->qlog != NULL) fclose(c->qlog);
+  if (c->qlog != NULL)
+    fclose(c->qlog);
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);
 }
 
-static size_t
-quic_conn_size(const void *ptr)
-{
+static size_t quic_conn_size(const void *ptr) {
   (void)ptr;
   return sizeof(quic_conn_t);
 }
 
 /* owner is the object wrapping this struct, so it needs no mark. */
-static void
-quic_conn_mark(void *ptr)
-{
+static void quic_conn_mark(void *ptr) {
   quic_conn_t *c = (quic_conn_t *)ptr;
   rb_gc_mark_movable(c->pending_exc);
   rb_gc_mark_movable(c->handler_owner);
@@ -77,9 +75,7 @@ quic_conn_mark(void *ptr)
    void* user_data ngtcp2 callbacks receive (which equals this struct,
    stored inside owner) keeps resolving @streams / @accept_queue. The
    raw ngtcp2/picotls pointers are outside Ruby's heap and are left alone. */
-static void
-quic_conn_compact(void *ptr)
-{
+static void quic_conn_compact(void *ptr) {
   quic_conn_t *c = (quic_conn_t *)ptr;
   c->owner = rb_gc_location(c->owner);
   c->pending_exc = rb_gc_location(c->pending_exc);
@@ -90,15 +86,20 @@ quic_conn_compact(void *ptr)
 }
 
 const rb_data_type_t quic_conn_data_type = {
-  "QUIC::Connection",
-  {quic_conn_mark, quic_conn_free, quic_conn_size, quic_conn_compact,},
-  NULL, NULL,
-  RUBY_TYPED_FREE_IMMEDIATELY,
+    "QUIC::Connection",
+    {
+        quic_conn_mark,
+        quic_conn_free,
+        quic_conn_size,
+        quic_conn_compact,
+    },
+    NULL,
+    NULL,
+    RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
 VALUE
-quic_conn_alloc(VALUE klass)
-{
+quic_conn_alloc(VALUE klass) {
   quic_conn_t *c = ALLOC(quic_conn_t);
   memset(c, 0, sizeof(*c));
   c->pending_exc = Qnil;
@@ -112,10 +113,9 @@ quic_conn_alloc(VALUE klass)
 /* Re-raise the exception a callback left in c->pending_exc, if any. Called
    right after ngtcp2 returns, before its return value is looked at: the
    NGTCP2_ERR_CALLBACK_FAILURE it reports is the result of that exception. */
-static void
-quic_conn_raise_pending(quic_conn_t *c)
-{
-  if (NIL_P(c->pending_exc)) return;
+static void quic_conn_raise_pending(quic_conn_t *c) {
+  if (NIL_P(c->pending_exc))
+    return;
   VALUE exc = c->pending_exc;
   c->pending_exc = Qnil;
   rb_exc_raise(exc);
@@ -125,42 +125,33 @@ quic_conn_raise_pending(quic_conn_t *c)
    (the first one wins; ngtcp2 stops at the first failing callback anyway)
    and turned into NGTCP2_ERR_CALLBACK_FAILURE, so that it never unwinds
    through ngtcp2. */
-static int
-quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg)
-{
+static int quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg) {
   int state = 0;
   rb_protect(body, (VALUE)arg, &state);
-  if (state == 0) return 0;
-  if (NIL_P(c->pending_exc)) c->pending_exc = rb_errinfo();
+  if (state == 0)
+    return 0;
+  if (NIL_P(c->pending_exc))
+    c->pending_exc = rb_errinfo();
   rb_set_errinfo(Qnil);
   return NGTCP2_ERR_CALLBACK_FAILURE;
 }
 
-quic_conn_t *
-quic_conn_get(VALUE self)
-{
+quic_conn_t *quic_conn_get(VALUE self) {
   quic_conn_t *c;
   TypedData_Get_Struct(self, quic_conn_t, &quic_conn_data_type, c);
   return c;
 }
 
-ngtcp2_conn *
-quic_conn_ptr(VALUE owner)
-{
-  return quic_conn_get(owner)->conn;
-}
+ngtcp2_conn *quic_conn_ptr(VALUE owner) { return quic_conn_get(owner)->conn; }
 
-ngtcp2_tstamp
-quic_now(void)
-{
+ngtcp2_tstamp quic_now(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (ngtcp2_tstamp)ts.tv_sec * NGTCP2_SECONDS + (ngtcp2_tstamp)ts.tv_nsec;
 }
 
-static void
-quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
-{
+static void quic_rand_cb(uint8_t *dest, size_t destlen,
+                         const ngtcp2_rand_ctx *rand_ctx) {
   (void)rand_ctx;
   RAND_bytes(dest, (int)destlen);
 }
@@ -168,11 +159,9 @@ quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
 /* A connection an Endpoint holds derives the token from the Endpoint's
    secret and enters the new CID in its table. Any other connection never
    sends a Stateless Reset, so a random token does. */
-static int
-quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
-                              ngtcp2_stateless_reset_token *token, size_t cidlen,
-                              void *user_data)
-{
+static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
+                                         ngtcp2_stateless_reset_token *token,
+                                         size_t cidlen, void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (RAND_bytes(cid->data, (int)cidlen) != 1) {
@@ -181,7 +170,8 @@ quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
   cid->datalen = cidlen;
   if (c->endpoint == NULL) {
     return RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) == 1
-      ? 0 : NGTCP2_ERR_CALLBACK_FAILURE;
+               ? 0
+               : NGTCP2_ERR_CALLBACK_FAILURE;
   }
   if (quic_endpoint_generate_reset_token(c->endpoint, token->data, cid) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -190,112 +180,105 @@ quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
   return 0;
 }
 
-static int
-quic_remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid, void *user_data)
-{
+static int quic_remove_connection_id_cb(ngtcp2_conn *conn,
+                                        const ngtcp2_cid *cid,
+                                        void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->endpoint != NULL) quic_endpoint_dissociate_cid(c->endpoint, cid, c->owner);
+  if (c->endpoint != NULL)
+    quic_endpoint_dissociate_cid(c->endpoint, cid, c->owner);
   return 0;
 }
 
-ngtcp2_conn *
-quic_conn_get_conn(ngtcp2_crypto_conn_ref *conn_ref)
-{
+ngtcp2_conn *quic_conn_get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
   return ((quic_conn_t *)conn_ref->user_data)->conn;
 }
 
-void
-quic_require_binary(VALUE str, const char *name)
-{
+void quic_require_binary(VALUE str, const char *name) {
   Check_Type(str, T_STRING);
   if (rb_enc_get_index(str) != rb_ascii8bit_encindex()) {
     rb_raise(rb_eArgError, "%s must be ASCII-8BIT (binary) encoding", name);
   }
 }
 
-void
-quic_require_sockaddr(VALUE str, const char *name)
-{
+void quic_require_sockaddr(VALUE str, const char *name) {
   quic_require_binary(str, name);
 
   long len = RSTRING_LEN(str);
   sa_family_t family = AF_UNSPEC;
   if (len >= (long)(offsetof(struct sockaddr, sa_family) + sizeof(family))) {
-    memcpy(&family, RSTRING_PTR(str) + offsetof(struct sockaddr, sa_family), sizeof(family));
+    memcpy(&family, RSTRING_PTR(str) + offsetof(struct sockaddr, sa_family),
+           sizeof(family));
   }
   if ((family == AF_INET && len == (long)sizeof(struct sockaddr_in)) ||
       (family == AF_INET6 && len == (long)sizeof(struct sockaddr_in6))) {
     return;
   }
-  rb_raise(rb_eArgError, "%s must be an AF_INET or AF_INET6 sockaddr (Addrinfo#to_sockaddr)", name);
+  rb_raise(rb_eArgError,
+           "%s must be an AF_INET or AF_INET6 sockaddr (Addrinfo#to_sockaddr)",
+           name);
 }
 
-static uint64_t
-quic_get_uint64_field(VALUE obj, const char *name)
-{
+static uint64_t quic_get_uint64_field(VALUE obj, const char *name) {
   VALUE v = rb_funcall(obj, rb_intern(name), 0);
   return (uint64_t)NUM2ULL(v);
 }
 
-static ngtcp2_cc_algo
-quic_cc_algo_from_sym(VALUE sym)
-{
+static ngtcp2_cc_algo quic_cc_algo_from_sym(VALUE sym) {
   Check_Type(sym, T_SYMBOL);
   ID id = SYM2ID(sym);
-  if (id == rb_intern("reno"))  return NGTCP2_CC_ALGO_RENO;
-  if (id == rb_intern("cubic")) return NGTCP2_CC_ALGO_CUBIC;
-  if (id == rb_intern("bbr"))   return NGTCP2_CC_ALGO_BBR;
-  rb_raise(rb_eArgError, "unknown cc_algo: %"PRIsVALUE" (expected :reno, :cubic, or :bbr)", sym);
+  if (id == rb_intern("reno"))
+    return NGTCP2_CC_ALGO_RENO;
+  if (id == rb_intern("cubic"))
+    return NGTCP2_CC_ALGO_CUBIC;
+  if (id == rb_intern("bbr"))
+    return NGTCP2_CC_ALGO_BBR;
+  rb_raise(rb_eArgError,
+           "unknown cc_algo: %" PRIsVALUE " (expected :reno, :cubic, or :bbr)",
+           sym);
 }
 
-void
-quic_fill_transport_params(ngtcp2_transport_params *params, VALUE tp)
-{
+void quic_fill_transport_params(ngtcp2_transport_params *params, VALUE tp) {
   ngtcp2_transport_params_default(params);
   params->initial_max_stream_data_bidi_local =
-    quic_get_uint64_field(tp, "initial_max_stream_data_bidi_local");
+      quic_get_uint64_field(tp, "initial_max_stream_data_bidi_local");
   params->initial_max_stream_data_bidi_remote =
-    quic_get_uint64_field(tp, "initial_max_stream_data_bidi_remote");
+      quic_get_uint64_field(tp, "initial_max_stream_data_bidi_remote");
   params->initial_max_stream_data_uni =
-    quic_get_uint64_field(tp, "initial_max_stream_data_uni");
-  params->initial_max_data =
-    quic_get_uint64_field(tp, "initial_max_data");
+      quic_get_uint64_field(tp, "initial_max_stream_data_uni");
+  params->initial_max_data = quic_get_uint64_field(tp, "initial_max_data");
   params->initial_max_streams_bidi =
-    quic_get_uint64_field(tp, "initial_max_streams_bidi");
+      quic_get_uint64_field(tp, "initial_max_streams_bidi");
   params->initial_max_streams_uni =
-    quic_get_uint64_field(tp, "initial_max_streams_uni");
+      quic_get_uint64_field(tp, "initial_max_streams_uni");
   params->max_idle_timeout =
-    (ngtcp2_duration)quic_get_uint64_field(tp, "max_idle_timeout");
+      (ngtcp2_duration)quic_get_uint64_field(tp, "max_idle_timeout");
   params->active_connection_id_limit =
-    quic_get_uint64_field(tp, "active_connection_id_limit");
+      quic_get_uint64_field(tp, "active_connection_id_limit");
 }
 
-void
-quic_fill_settings(ngtcp2_settings *settings, VALUE st)
-{
+void quic_fill_settings(ngtcp2_settings *settings, VALUE st) {
   ngtcp2_settings_default(settings);
   settings->initial_ts = quic_now();
-  settings->cc_algo = quic_cc_algo_from_sym(rb_funcall(st, rb_intern("cc_algo"), 0));
+  settings->cc_algo =
+      quic_cc_algo_from_sym(rb_funcall(st, rb_intern("cc_algo"), 0));
   settings->initial_rtt =
-    (ngtcp2_duration)quic_get_uint64_field(st, "initial_rtt");
-  settings->max_window =
-    quic_get_uint64_field(st, "max_window");
-  settings->max_stream_window =
-    quic_get_uint64_field(st, "max_stream_window");
+      (ngtcp2_duration)quic_get_uint64_field(st, "initial_rtt");
+  settings->max_window = quic_get_uint64_field(st, "max_window");
+  settings->max_stream_window = quic_get_uint64_field(st, "max_stream_window");
   settings->handshake_timeout =
-    (ngtcp2_duration)quic_get_uint64_field(st, "handshake_timeout");
+      (ngtcp2_duration)quic_get_uint64_field(st, "handshake_timeout");
   VALUE no_pmtud = rb_funcall(st, rb_intern("no_pmtud"), 0);
   settings->no_pmtud = RTEST(no_pmtud) ? 1 : 0;
 }
 
 /* ngtcp2_settings.qlog_write. Touches no Ruby object, so it needs no
    rb_protect. A write error only costs qlog. */
-static void
-quic_qlog_write_cb(void *user_data, uint32_t flags, const void *data, size_t datalen)
-{
+static void quic_qlog_write_cb(void *user_data, uint32_t flags,
+                               const void *data, size_t datalen) {
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->qlog == NULL) return;
+  if (c->qlog == NULL)
+    return;
   fwrite(data, 1, datalen, c->qlog);
   if (flags & NGTCP2_QLOG_WRITE_FLAG_FIN) {
     fclose(c->qlog);
@@ -303,29 +286,31 @@ quic_qlog_write_cb(void *user_data, uint32_t flags, const void *data, size_t dat
   }
 }
 
-void
-quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v, ngtcp2_settings *settings)
-{
-  VALUE dir = quic_path_value(rb_funcall(settings_v, rb_intern("qlog_dir"), 0), "qlog_dir");
-  if (NIL_P(dir)) return;
+void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v,
+                         ngtcp2_settings *settings) {
+  VALUE dir = quic_path_value(rb_funcall(settings_v, rb_intern("qlog_dir"), 0),
+                              "qlog_dir");
+  if (NIL_P(dir))
+    return;
 
   char hex[NGTCP2_MAX_CIDLEN * 2 + 1];
   for (size_t i = 0; i < c->scid.datalen; i++) {
     snprintf(hex + i * 2, 3, "%02x", c->scid.data[i]);
   }
   hex[c->scid.datalen * 2] = '\0';
-  VALUE path = rb_sprintf("%"PRIsVALUE"/%s.sqlog", dir, hex);
+  VALUE path = rb_sprintf("%" PRIsVALUE "/%s.sqlog", dir, hex);
   c->qlog = fopen(StringValueCStr(path), "w");
-  if (c->qlog != NULL) settings->qlog_write = quic_qlog_write_cb;
+  if (c->qlog != NULL)
+    settings->qlog_write = quic_qlog_write_cb;
 }
 
 /* Validate a path setting (ca_file, ca_path, ...) and return it as a String,
    or Qnil. Accepts a String or anything responding to #to_path. Every
    misconfiguration raises ArgumentError, including a wrong type. */
 VALUE
-quic_path_value(VALUE value, const char *name)
-{
-  if (NIL_P(value)) return Qnil;
+quic_path_value(VALUE value, const char *name) {
+  if (NIL_P(value))
+    return Qnil;
 
   VALUE path = value;
   if (!RB_TYPE_P(path, T_STRING)) {
@@ -333,8 +318,9 @@ quic_path_value(VALUE value, const char *name)
       path = rb_funcall(path, rb_intern("to_path"), 0);
     }
     if (!RB_TYPE_P(path, T_STRING)) {
-      rb_raise(rb_eArgError, "%s must be a String or Pathname (got %"PRIsVALUE")",
-               name, rb_obj_class(value));
+      rb_raise(rb_eArgError,
+               "%s must be a String or Pathname (got %" PRIsVALUE ")", name,
+               rb_obj_class(value));
     }
   }
   /* Raises ArgumentError when the path contains a NUL byte. */
@@ -344,13 +330,13 @@ quic_path_value(VALUE value, const char *name)
 
 /* picotls keeps the pointers of an ALPN list for the whole handshake, so
    ALLOCA_N would not survive. */
-void
-quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf)
-{
+void quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count,
+                    uint8_t **buf) {
   Check_Type(alpn_ary, T_ARRAY);
   long n_alpn = RARRAY_LEN(alpn_ary);
   *count = 0;
-  if (n_alpn <= 0) return;
+  if (n_alpn <= 0)
+    return;
 
   size_t total = 0;
   for (long i = 0; i < n_alpn; i++) {
@@ -377,20 +363,16 @@ quic_copy_alpn(VALUE alpn_ary, ptls_iovec_t **list, size_t *count, uint8_t **buf
 
 /* An empty list leaves c->alpn NULL, which a client sends as no ALPN
    extension at all. */
-void
-quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v)
-{
-  quic_copy_alpn(rb_funcall(settings_v, rb_intern("alpn"), 0), &c->alpn, &c->alpn_count,
-                 &c->alpn_buf);
+void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v) {
+  quic_copy_alpn(rb_funcall(settings_v, rb_intern("alpn"), 0), &c->alpn,
+                 &c->alpn_count, &c->alpn_buf);
 }
 
 /* Shared helper: look up the QUIC::Stream registered for stream_id in the
    owner connection's @streams Hash. Returns Qnil if not found (which can
    happen if the stream was already removed by a previous stream_close
    callback). */
-static VALUE
-quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id)
-{
+static VALUE quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id) {
   VALUE streams = rb_ivar_get(c->owner, rb_intern("@streams"));
   return rb_hash_aref(streams, LL2NUM(stream_id));
 }
@@ -413,44 +395,40 @@ struct quic_stream_cb_args {
   uint64_t app_error_code;
 };
 
-static VALUE
-quic_stream_open_body(VALUE arg)
-{
+static VALUE quic_stream_open_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
   if (!NIL_P(rb_hash_aref(streams, LL2NUM(a->stream_id)))) {
-    return Qnil;  /* already known (opened by this endpoint) */
+    return Qnil; /* already known (opened by this endpoint) */
   }
   VALUE stream = quic_stream_new(a->stream_id, a->c->owner);
   rb_hash_aset(streams, LL2NUM(a->stream_id), stream);
   return Qnil;
 }
 
-void
-quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id)
-{
-  if (!ngtcp2_conn_is_local_stream2(conn, stream_id) && ngtcp2_is_bidi_stream(stream_id)) {
+void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id) {
+  if (!ngtcp2_conn_is_local_stream2(conn, stream_id) &&
+      ngtcp2_is_bidi_stream(stream_id)) {
     ngtcp2_conn_extend_max_streams_bidi(conn, 1);
   }
 }
 
-static int
-quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
-{
+static int quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id,
+                               void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) return 0;  /* the handler keeps its own stream state */
+  if (c->handler)
+    return 0; /* the handler keeps its own stream state */
   struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id};
   return quic_conn_protect(c, quic_stream_open_body, &a);
 }
 
-static VALUE
-quic_recv_stream_data_body(VALUE arg)
-{
+static VALUE quic_recv_stream_data_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   quic_conn_t *c = a->c;
   VALUE stream = quic_conn_lookup_stream(c, a->stream_id);
-  if (NIL_P(stream)) return Qnil;
+  if (NIL_P(stream))
+    return Qnil;
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
@@ -459,7 +437,8 @@ quic_recv_stream_data_body(VALUE arg)
      marks the initiator (0 == client, 1 == server), so a client queues the
      odd ids and a server the even ones. Push once, on first data arrival,
      then mark so later data does not re-enqueue. */
-  bool peer_initiated = c->is_server ? !(a->stream_id & 0x01) : (a->stream_id & 0x01);
+  bool peer_initiated =
+      c->is_server ? !(a->stream_id & 0x01) : (a->stream_id & 0x01);
   if (!s->accept_queued && peer_initiated) {
     VALUE accept_queue = rb_ivar_get(c->owner, rb_intern("@accept_queue"));
     rb_ary_push(accept_queue, stream);
@@ -476,25 +455,25 @@ quic_recv_stream_data_body(VALUE arg)
   return Qnil;
 }
 
-static int
-quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
-                         uint64_t offset, const uint8_t *data, size_t datalen,
-                         void *user_data, void *stream_user_data)
-{
+static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
+                                    int64_t stream_id, uint64_t offset,
+                                    const uint8_t *data, size_t datalen,
+                                    void *user_data, void *stream_user_data) {
   (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     size_t consumed = 0;
     int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
-    if (c->handler->recv_stream_data(c->handler_ud, stream_id, data, datalen, fin,
-                                     c->now, &consumed) < 0) {
+    if (c->handler->recv_stream_data(c->handler_ud, stream_id, data, datalen,
+                                     fin, c->now, &consumed) < 0) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
     /* What the handler consumed outright (for HTTP/3, everything but the
        request body) goes straight back to the peer as credit. */
     if (consumed > 0) {
-      if (ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed) != 0) {
+      if (ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed) !=
+          0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
       }
       ngtcp2_conn_extend_max_offset(conn, consumed);
@@ -502,17 +481,20 @@ quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
     return 0;
   }
   struct quic_stream_cb_args a = {
-    .c = c, .stream_id = stream_id, .flags = flags, .data = data, .datalen = datalen,
+      .c = c,
+      .stream_id = stream_id,
+      .flags = flags,
+      .data = data,
+      .datalen = datalen,
   };
   return quic_conn_protect(c, quic_recv_stream_data_body, &a);
 }
 
-static VALUE
-quic_acked_stream_data_offset_body(VALUE arg)
-{
+static VALUE quic_acked_stream_data_offset_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream)) return Qnil;
+  if (NIL_P(stream))
+    return Qnil;
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
@@ -536,26 +518,25 @@ quic_acked_stream_data_offset_body(VALUE arg)
   return Qnil;
 }
 
-static int
-quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
-                                 uint64_t offset, uint64_t datalen,
-                                 void *user_data, void *stream_user_data)
-{
+static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
+                                            int64_t stream_id, uint64_t offset,
+                                            uint64_t datalen, void *user_data,
+                                            void *stream_user_data) {
   (void)conn;
   (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     return c->handler->acked_stream_data(c->handler_ud, stream_id, datalen) < 0
-      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+               ? NGTCP2_ERR_CALLBACK_FAILURE
+               : 0;
   }
-  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .acked = datalen};
+  struct quic_stream_cb_args a = {
+      .c = c, .stream_id = stream_id, .acked = datalen};
   return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
 }
 
-static VALUE
-quic_stream_close_body(VALUE arg)
-{
+static VALUE quic_stream_close_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
   VALUE stream = rb_hash_aref(streams, LL2NUM(a->stream_id));
@@ -585,11 +566,9 @@ quic_stream_close_body(VALUE arg)
   return Qnil;
 }
 
-static int
-quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
-                     uint64_t app_error_code, void *user_data,
-                     void *stream_user_data)
-{
+static int quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
+                                int64_t stream_id, uint64_t app_error_code,
+                                void *user_data, void *stream_user_data) {
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
@@ -597,21 +576,25 @@ quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
        gets its stream back at once. */
     quic_conn_give_back_peer_stream(conn, stream_id);
     int has_code = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) != 0;
-    return c->handler->stream_close(c->handler_ud, stream_id, has_code, app_error_code) < 0
-      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+    return c->handler->stream_close(c->handler_ud, stream_id, has_code,
+                                    app_error_code) < 0
+               ? NGTCP2_ERR_CALLBACK_FAILURE
+               : 0;
   }
   struct quic_stream_cb_args a = {
-    .c = c, .stream_id = stream_id, .flags = flags, .app_error_code = app_error_code,
+      .c = c,
+      .stream_id = stream_id,
+      .flags = flags,
+      .app_error_code = app_error_code,
   };
   return quic_conn_protect(c, quic_stream_close_body, &a);
 }
 
-static VALUE
-quic_stream_reset_body(VALUE arg)
-{
+static VALUE quic_stream_reset_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream)) return Qnil;
+  if (NIL_P(stream))
+    return Qnil;
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
@@ -621,76 +604,78 @@ quic_stream_reset_body(VALUE arg)
   return Qnil;
 }
 
-static int
-quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
-                     uint64_t app_error_code, void *user_data,
-                     void *stream_user_data)
-{
+static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
+                                uint64_t final_size, uint64_t app_error_code,
+                                void *user_data, void *stream_user_data) {
   (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
-    return c->handler->stream_reset(c->handler_ud, stream_id, final_size, app_error_code) < 0
-      ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+    return c->handler->stream_reset(c->handler_ud, stream_id, final_size,
+                                    app_error_code) < 0
+               ? NGTCP2_ERR_CALLBACK_FAILURE
+               : 0;
   }
-  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id, .app_error_code = app_error_code};
+  struct quic_stream_cb_args a = {
+      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
   return quic_conn_protect(c, quic_stream_reset_body, &a);
 }
 
 /* The callbacks below matter only to a stream handler. Without one, the
    QUIC::Stream mode needs none of them. */
 
-static int
-quic_stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
-                            uint64_t app_error_code, void *user_data,
-                            void *stream_user_data)
-{
+static int quic_stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
+                                       uint64_t app_error_code, void *user_data,
+                                       void *stream_user_data) {
   (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (!c->handler) return 0;
-  return c->handler->stream_stop_sending(c->handler_ud, stream_id, app_error_code) < 0
-    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+  if (!c->handler)
+    return 0;
+  return c->handler->stream_stop_sending(c->handler_ud, stream_id,
+                                         app_error_code) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
 }
 
-static int
-quic_extend_max_stream_data_cb(ngtcp2_conn *conn, int64_t stream_id,
-                               uint64_t max_data, void *user_data,
-                               void *stream_user_data)
-{
+static int quic_extend_max_stream_data_cb(ngtcp2_conn *conn, int64_t stream_id,
+                                          uint64_t max_data, void *user_data,
+                                          void *stream_user_data) {
   (void)conn;
   (void)max_data;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (!c->handler) return 0;
+  if (!c->handler)
+    return 0;
   return c->handler->extend_max_stream_data(c->handler_ud, stream_id) < 0
-    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
 }
 
-static int
-quic_extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn, uint64_t max_streams,
-                                       void *user_data)
-{
+static int quic_extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn,
+                                                  uint64_t max_streams,
+                                                  void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (!c->handler) return 0;
-  return c->handler->extend_max_remote_streams_bidi(c->handler_ud, max_streams) < 0
-    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+  if (!c->handler)
+    return 0;
+  return c->handler->extend_max_remote_streams_bidi(c->handler_ud,
+                                                    max_streams) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
 }
 
-static int
-quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
-{
+static int quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (!c->handler) return 0;
+  if (!c->handler)
+    return 0;
   return c->handler->handshake_completed(c->handler_ud) < 0
-    ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
 }
 
-void
-quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
-{
+void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   memset(callbacks, 0, sizeof(*callbacks));
   callbacks->recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb;
   callbacks->encrypt = ngtcp2_crypto_encrypt_cb;
@@ -698,8 +683,10 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
   callbacks->hp_mask = ngtcp2_crypto_hp_mask_cb;
   callbacks->update_key = ngtcp2_crypto_update_key_cb;
   callbacks->delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
-  callbacks->delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
-  callbacks->get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb;
+  callbacks->delete_crypto_cipher_ctx =
+      ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
+  callbacks->get_path_challenge_data2 =
+      ngtcp2_crypto_get_path_challenge_data2_cb;
   callbacks->version_negotiation = ngtcp2_crypto_version_negotiation_cb;
   callbacks->rand = quic_rand_cb;
   callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
@@ -711,7 +698,8 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
   callbacks->stream_reset = quic_stream_reset_cb;
   callbacks->stream_stop_sending = quic_stream_stop_sending_cb;
   callbacks->extend_max_stream_data = quic_extend_max_stream_data_cb;
-  callbacks->extend_max_remote_streams_bidi = quic_extend_max_remote_streams_bidi_cb;
+  callbacks->extend_max_remote_streams_bidi =
+      quic_extend_max_remote_streams_bidi_cb;
   callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
@@ -720,11 +708,10 @@ quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks)
    (no round-robin). Sets *out_datav to the byte slice to send, *out_datavcnt
    to 0 or 1, *out_flags to NGTCP2_WRITE_STREAM_FLAG_FIN when applicable.
    Returns the stream's Ruby VALUE (or Qnil if no candidate). */
-static VALUE
-quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
-                           size_t *out_datavcnt, uint32_t *out_flags,
-                           int64_t *out_stream_id)
-{
+static VALUE quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
+                                        size_t *out_datavcnt,
+                                        uint32_t *out_flags,
+                                        int64_t *out_stream_id) {
   VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
   VALUE stream_values = rb_funcall(streams, rb_intern("values"), 0);
 
@@ -732,7 +719,8 @@ quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
     VALUE st = RARRAY_AREF(stream_values, i);
     quic_stream_t *s;
     TypedData_Get_Struct(st, quic_stream_t, &quic_stream_data_type, s);
-    if (s->fin_flushed) continue;
+    if (s->fin_flushed)
+      continue;
 
     VALUE pending = rb_ivar_get(st, rb_intern("@pending_chunks"));
     uint64_t position = s->sent_offset - s->pending_shifted;
@@ -762,8 +750,8 @@ quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
          remaining bytes of it (ngtcp2 may encode less, in which case FIN
          won't actually be flushed and we'll retry next call). */
       *out_flags = (s->fin_sent && chunk_idx == chunks_count - 1)
-                     ? NGTCP2_WRITE_STREAM_FLAG_FIN
-                     : 0;
+                       ? NGTCP2_WRITE_STREAM_FLAG_FIN
+                       : 0;
       return st;
     }
 
@@ -785,21 +773,21 @@ quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
    a pending FIN, route the packet through ngtcp2_conn_writev_stream so the
    stream data gets framed alongside connection-level frames. Falls back to
    conn-only when no stream is queued. Returns what ngtcp2 returned. */
-static ngtcp2_ssize
-quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
-                            ngtcp2_pkt_info *pi, uint8_t *dest, size_t destlen)
-{
+static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
+                                                ngtcp2_path *path,
+                                                ngtcp2_pkt_info *pi,
+                                                uint8_t *dest, size_t destlen) {
   ngtcp2_vec datav;
   size_t datavcnt = 0;
   uint32_t writev_flags = 0;
   int64_t send_stream_id = -1;
   VALUE selected_stream = quic_conn_pick_send_stream(
-    self, &datav, &datavcnt, &writev_flags, &send_stream_id);
+      self, &datav, &datavcnt, &writev_flags, &send_stream_id);
 
   ngtcp2_ssize pdatalen = -1;
   ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-    c->conn, path, pi, dest, destlen, &pdatalen,
-    writev_flags, send_stream_id, &datav, datavcnt, c->now);
+      c->conn, path, pi, dest, destlen, &pdatalen, writev_flags, send_stream_id,
+      &datav, datavcnt, c->now);
 
   if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
     /* The stream's queued data is beyond what the peer's flow control lets
@@ -814,7 +802,8 @@ quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
                                   0, -1, NULL, 0, c->now);
   }
 
-  if (n < 0 || !NIL_P(c->pending_exc)) return n;
+  if (n < 0 || !NIL_P(c->pending_exc))
+    return n;
 
   /* Update the selected stream's accounting only when we actually sent
      bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
@@ -822,8 +811,8 @@ quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
      or other frames). */
   if (!NIL_P(selected_stream) && pdatalen > 0) {
     quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
+    TypedData_Get_Struct(selected_stream, quic_stream_t, &quic_stream_data_type,
+                         s);
     s->sent_offset += (uint64_t)pdatalen;
     /* FIN is only actually written when all requested data fits in the
        frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
@@ -835,8 +824,8 @@ quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c, ngtcp2_path *path,
              (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
     /* FIN-only packet (no data) was successfully written. */
     quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t,
-                         &quic_stream_data_type, s);
+    TypedData_Get_Struct(selected_stream, quic_stream_t, &quic_stream_data_type,
+                         s);
     s->fin_flushed = true;
   }
   return n;
@@ -857,10 +846,10 @@ _Static_assert(offsetof(quic_ext_vec, len) == offsetof(ngtcp2_vec, len),
    nghttp3. NGTCP2_WRITE_STREAM_FLAG_MORE is not used, so a packet carries
    data of one stream at most. A handler failure is reported as
    NGTCP2_ERR_CALLBACK_FAILURE. */
-static ngtcp2_ssize
-quic_conn_write_pkt_handler(quic_conn_t *c, ngtcp2_path *path, ngtcp2_pkt_info *pi,
-                            uint8_t *dest, size_t destlen)
-{
+static ngtcp2_ssize quic_conn_write_pkt_handler(quic_conn_t *c,
+                                                ngtcp2_path *path,
+                                                ngtcp2_pkt_info *pi,
+                                                uint8_t *dest, size_t destlen) {
   const quic_ext_stream_handler *h = c->handler;
   for (;;) {
     int64_t sid = -1;
@@ -868,46 +857,49 @@ quic_conn_write_pkt_handler(quic_conn_t *c, ngtcp2_path *path, ngtcp2_pkt_info *
     quic_ext_vec vec[QUIC_HANDLER_VECCNT];
     size_t nvec = 0;
     if (ngtcp2_conn_get_max_data_left2(c->conn) &&
-        h->next_stream_data(c->handler_ud, &sid, &fin, vec, QUIC_HANDLER_VECCNT, &nvec) < 0) {
+        h->next_stream_data(c->handler_ud, &sid, &fin, vec, QUIC_HANDLER_VECCNT,
+                            &nvec) < 0) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
 
     ngtcp2_ssize ndatalen = -1;
-    ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-      c->conn, path, pi, dest, destlen, &ndatalen,
-      fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0, sid,
-      (const ngtcp2_vec *)vec, nvec, c->now);
+    ngtcp2_ssize n =
+        ngtcp2_conn_writev_stream(c->conn, path, pi, dest, destlen, &ndatalen,
+                                  fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0, sid,
+                                  (const ngtcp2_vec *)vec, nvec, c->now);
     if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
-      if (h->stream_blocked(c->handler_ud, sid) < 0) return NGTCP2_ERR_CALLBACK_FAILURE;
+      if (h->stream_blocked(c->handler_ud, sid) < 0)
+        return NGTCP2_ERR_CALLBACK_FAILURE;
       continue;
     }
     if (n == NGTCP2_ERR_STREAM_SHUT_WR) {
-      if (h->stream_shut_write(c->handler_ud, sid) < 0) return NGTCP2_ERR_CALLBACK_FAILURE;
+      if (h->stream_shut_write(c->handler_ud, sid) < 0)
+        return NGTCP2_ERR_CALLBACK_FAILURE;
       continue;
     }
-    if (n < 0) return n;
-    if (ndatalen >= 0 && h->stream_data_written(c->handler_ud, sid, (size_t)ndatalen) < 0) {
+    if (n < 0)
+      return n;
+    if (ndatalen >= 0 &&
+        h->stream_data_written(c->handler_ud, sid, (size_t)ndatalen) < 0) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
-    return n;  /* 0: nothing to send */
+    return n; /* 0: nothing to send */
   }
 }
 
-ngtcp2_ssize
-quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c, ngtcp2_path *path, uint8_t *dest)
-{
+ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c,
+                                     ngtcp2_path *path, uint8_t *dest) {
   ngtcp2_pkt_info pi;
   memset(&pi, 0, sizeof(pi));
 
   c->now = quic_now();
-  return c->handler
-    ? quic_conn_write_pkt_handler(c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN)
-    : quic_conn_write_pkt_streams(self, c, path, &pi, dest, QUIC_WRITE_PKT_BUFLEN);
+  return c->handler ? quic_conn_write_pkt_handler(c, path, &pi, dest,
+                                                  QUIC_WRITE_PKT_BUFLEN)
+                    : quic_conn_write_pkt_streams(self, c, path, &pi, dest,
+                                                  QUIC_WRITE_PKT_BUFLEN);
 }
 
-static VALUE
-quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_conn_write_pkt(int argc, VALUE *argv, VALUE self) {
   VALUE buffer = Qnil;
   rb_scan_args(argc, argv, "01", &buffer);
 
@@ -923,15 +915,16 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
       rb_raise(rb_eArgError, "buffer must be ASCII-8BIT (binary) encoding");
     }
     if (RSTRING_LEN(buffer) < (long)QUIC_WRITE_PKT_BUFLEN) {
-      rb_str_modify_expand(buffer, (long)QUIC_WRITE_PKT_BUFLEN - RSTRING_LEN(buffer));
+      rb_str_modify_expand(buffer,
+                           (long)QUIC_WRITE_PKT_BUFLEN - RSTRING_LEN(buffer));
     }
   }
 
   ngtcp2_path_storage path_storage;
   ngtcp2_path_storage_zero(&path_storage);
 
-  ngtcp2_ssize n =
-    quic_conn_write_pkt_raw(self, c, &path_storage.path, (uint8_t *)RSTRING_PTR(buffer));
+  ngtcp2_ssize n = quic_conn_write_pkt_raw(self, c, &path_storage.path,
+                                           (uint8_t *)RSTRING_PTR(buffer));
 
   if (!NIL_P(c->pending_exc)) {
     rb_str_set_len(buffer, 0);
@@ -958,19 +951,21 @@ quic_conn_write_pkt(int argc, VALUE *argv, VALUE self)
    sent, and becomes CertificateVerifyFailed when the verifier rejected the
    peer. */
 VALUE
-quic_conn_error_new(quic_conn_t *c, int rv)
-{
-  if (rv != NGTCP2_ERR_CRYPTO) return quic_ngtcp2_error_new(rv);
+quic_conn_error_new(quic_conn_t *c, int rv) {
+  if (rv != NGTCP2_ERR_CRYPTO)
+    return quic_ngtcp2_error_new(rv);
 
   /* 0 means "not set" to ngtcp2; close_notify (0) is never sent for a
      verification failure, so report it as nil. */
   uint8_t alert = ngtcp2_conn_get_tls_alert2(c->conn);
   VALUE exc;
   if (c->verify_failed) {
-    VALUE msg = c->verify_result
-      ? rb_sprintf("certificate verify failed (%s)",
-                   X509_verify_cert_error_string(c->verify_result))
-      : rb_str_new_cstr("certificate verify failed (server sent no certificate)");
+    VALUE msg =
+        c->verify_result
+            ? rb_sprintf("certificate verify failed (%s)",
+                         X509_verify_cert_error_string(c->verify_result))
+            : rb_str_new_cstr(
+                  "certificate verify failed (server sent no certificate)");
     exc = rb_exc_new_str(rb_eQUICErrorCertificateVerifyFailed, msg);
     rb_ivar_set(exc, rb_intern("@verify_result"),
                 c->verify_result ? INT2NUM(c->verify_result) : Qnil);
@@ -982,10 +977,8 @@ quic_conn_error_new(quic_conn_t *c, int rv)
   return exc;
 }
 
-int
-quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path, const uint8_t *data,
-                       size_t datalen)
-{
+int quic_conn_read_pkt_raw(quic_conn_t *c, const ngtcp2_path *path,
+                           const uint8_t *data, size_t datalen) {
   ngtcp2_pkt_info pi;
   memset(&pi, 0, sizeof(pi));
 
@@ -999,11 +992,10 @@ struct quic_read_pkt_args {
   ngtcp2_path path;
 };
 
-static VALUE
-quic_read_pkt_body(VALUE arg)
-{
+static VALUE quic_read_pkt_body(VALUE arg) {
   struct quic_read_pkt_args *a = (struct quic_read_pkt_args *)arg;
-  int rv = quic_conn_read_pkt_raw(a->c, &a->path, (const uint8_t *)RSTRING_PTR(a->packet),
+  int rv = quic_conn_read_pkt_raw(a->c, &a->path,
+                                  (const uint8_t *)RSTRING_PTR(a->packet),
                                   (size_t)RSTRING_LEN(a->packet));
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
@@ -1013,16 +1005,12 @@ quic_read_pkt_body(VALUE arg)
   return Qnil;
 }
 
-static VALUE
-quic_read_pkt_unlock(VALUE arg)
-{
+static VALUE quic_read_pkt_unlock(VALUE arg) {
   rb_str_unlocktmp(((struct quic_read_pkt_args *)arg)->packet);
   return Qnil;
 }
 
-static VALUE
-quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_conn_read_pkt(int argc, VALUE *argv, VALUE self) {
   VALUE packet = Qnil;
   VALUE opts = Qnil;
   rb_scan_args(argc, argv, "1:", &packet, &opts);
@@ -1031,15 +1019,17 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
     rb_raise(rb_eArgError, "missing keywords: local_sockaddr, remote_sockaddr");
   }
 
-  VALUE local_sockaddr  = rb_hash_aref(opts, ID2SYM(rb_intern("local_sockaddr")));
-  VALUE remote_sockaddr = rb_hash_aref(opts, ID2SYM(rb_intern("remote_sockaddr")));
+  VALUE local_sockaddr =
+      rb_hash_aref(opts, ID2SYM(rb_intern("local_sockaddr")));
+  VALUE remote_sockaddr =
+      rb_hash_aref(opts, ID2SYM(rb_intern("remote_sockaddr")));
 
   if (NIL_P(local_sockaddr) || NIL_P(remote_sockaddr)) {
     rb_raise(rb_eArgError, "missing keywords: local_sockaddr, remote_sockaddr");
   }
 
-  quic_require_binary(packet,          "packet");
-  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_binary(packet, "packet");
+  quic_require_sockaddr(local_sockaddr, "local_sockaddr");
   quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
 
   quic_conn_t *c = quic_conn_get(self);
@@ -1047,78 +1037,69 @@ quic_conn_read_pkt(int argc, VALUE *argv, VALUE self)
   struct quic_read_pkt_args args;
   args.c = c;
   args.packet = packet;
-  args.path.local.addr     = (struct sockaddr *)RSTRING_PTR(local_sockaddr);
-  args.path.local.addrlen  = (ngtcp2_socklen)RSTRING_LEN(local_sockaddr);
-  args.path.remote.addr    = (struct sockaddr *)RSTRING_PTR(remote_sockaddr);
+  args.path.local.addr = (struct sockaddr *)RSTRING_PTR(local_sockaddr);
+  args.path.local.addrlen = (ngtcp2_socklen)RSTRING_LEN(local_sockaddr);
+  args.path.remote.addr = (struct sockaddr *)RSTRING_PTR(remote_sockaddr);
   args.path.remote.addrlen = (ngtcp2_socklen)RSTRING_LEN(remote_sockaddr);
-  args.path.user_data      = NULL;
+  args.path.user_data = NULL;
 
   rb_str_locktmp(packet);
-  return rb_ensure(quic_read_pkt_body, (VALUE)&args,
-                   quic_read_pkt_unlock, (VALUE)&args);
+  return rb_ensure(quic_read_pkt_body, (VALUE)&args, quic_read_pkt_unlock,
+                   (VALUE)&args);
 }
 
-static VALUE
-quic_conn_handshake_completed_p(VALUE self)
-{
+static VALUE quic_conn_handshake_completed_p(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   return ngtcp2_conn_get_handshake_completed2(c->conn) ? Qtrue : Qfalse;
 }
 
-static VALUE
-quic_conn_in_closing_period_p(VALUE self)
-{
+static VALUE quic_conn_in_closing_period_p(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   return ngtcp2_conn_in_closing_period2(c->conn) ? Qtrue : Qfalse;
 }
 
-static VALUE
-quic_conn_in_draining_period_p(VALUE self)
-{
+static VALUE quic_conn_in_draining_period_p(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   return ngtcp2_conn_in_draining_period2(c->conn) ? Qtrue : Qfalse;
 }
 
-static VALUE
-quic_conn_expiry(VALUE self)
-{
+static VALUE quic_conn_expiry(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   ngtcp2_tstamp t = ngtcp2_conn_get_expiry2(c->conn);
-  if (t == UINT64_MAX) return Qnil;
+  if (t == UINT64_MAX)
+    return Qnil;
   return ULL2NUM((unsigned long long)t);
 }
 
 /* Caller is responsible for ordering with #read_pkt / #write_pkt:
-   read_pkt or handle_expiry to advance ngtcp2 state, then write_pkt to flush. */
-static VALUE
-quic_conn_handle_expiry(VALUE self)
-{
+   read_pkt or handle_expiry to advance ngtcp2 state, then write_pkt to flush.
+ */
+static VALUE quic_conn_handle_expiry(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   c->now = quic_now();
   int rv = ngtcp2_conn_handle_expiry(c->conn, c->now);
   quic_conn_raise_pending(c);
-  if (rv != 0) quic_raise_ngtcp2_error(rv);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
   return Qnil;
 }
 
 /* QUIC::Stream objects exist only without a stream handler. */
-static void
-quic_conn_require_stream_mode(quic_conn_t *c)
-{
+static void quic_conn_require_stream_mode(quic_conn_t *c) {
   if (c->handler) {
-    rb_raise(rb_eQUICErrorInvalidState, "the connection's streams belong to a C stream handler");
+    rb_raise(rb_eQUICErrorInvalidState,
+             "the connection's streams belong to a C stream handler");
   }
 }
 
-static VALUE
-quic_conn_open_bidi_stream(VALUE self)
-{
+static VALUE quic_conn_open_bidi_stream(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   quic_conn_require_stream_mode(c);
 
   int64_t stream_id;
   int rv = ngtcp2_conn_open_bidi_stream(c->conn, &stream_id, NULL);
-  if (rv != 0) quic_raise_ngtcp2_error(rv);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
 
   VALUE stream = quic_stream_new(stream_id, self);
   VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
@@ -1126,15 +1107,14 @@ quic_conn_open_bidi_stream(VALUE self)
   return stream;
 }
 
-static VALUE
-quic_conn_open_uni_stream(VALUE self)
-{
+static VALUE quic_conn_open_uni_stream(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   quic_conn_require_stream_mode(c);
 
   int64_t stream_id;
   int rv = ngtcp2_conn_open_uni_stream(c->conn, &stream_id, NULL);
-  if (rv != 0) quic_raise_ngtcp2_error(rv);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
 
   VALUE stream = quic_stream_new(stream_id, self);
   VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
@@ -1148,9 +1128,7 @@ quic_conn_open_uni_stream(VALUE self)
    retransmits via the caller's pump loop. Calling #close on a connection
    that is already in the closing or draining period is a no-op (= returns
    nil without doing any I/O). */
-static VALUE
-quic_conn_close_m(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
   VALUE opts = Qnil;
   rb_scan_args(argc, argv, "0:", &opts);
 
@@ -1184,24 +1162,25 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
      out through Endpoint#write_pkt. Once it has left the Endpoint's table
      it is finished, and #close does nothing. */
   if (c->from_endpoint) {
-    if (c->endpoint == NULL) return Qnil;
+    if (c->endpoint == NULL)
+      return Qnil;
     ngtcp2_ccerr ccerr;
-    ngtcp2_ccerr_set_application_error(&ccerr, error_code, reason_len > 0 ? reason_ptr : NULL,
-                                       reason_len);
+    ngtcp2_ccerr_set_application_error(
+        &ccerr, error_code, reason_len > 0 ? reason_ptr : NULL, reason_len);
     quic_endpoint_close_conn(c->endpoint, c, &ccerr);
     return Qnil;
   }
 
   VALUE sock = rb_ivar_get(self, rb_intern("@sock"));
   if (NIL_P(sock)) {
-    rb_raise(rb_eQUICErrorNotBound, "%"PRIsVALUE"#bind(sock) has not been called",
+    rb_raise(rb_eQUICErrorNotBound,
+             "%" PRIsVALUE "#bind(sock) has not been called",
              rb_obj_class(self));
   }
 
   ngtcp2_ccerr ccerr;
-  ngtcp2_ccerr_set_application_error(&ccerr, error_code,
-                                     reason_len > 0 ? reason_ptr : NULL,
-                                     reason_len);
+  ngtcp2_ccerr_set_application_error(
+      &ccerr, error_code, reason_len > 0 ? reason_ptr : NULL, reason_len);
 
   ngtcp2_path_storage path_storage;
   ngtcp2_path_storage_zero(&path_storage);
@@ -1212,8 +1191,8 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
   uint8_t *dest = (uint8_t *)RSTRING_PTR(buffer);
 
   ngtcp2_ssize n = ngtcp2_conn_write_connection_close(
-      c->conn, &path_storage.path, &pi, dest,
-      (size_t)QUIC_WRITE_PKT_BUFLEN, &ccerr, quic_now());
+      c->conn, &path_storage.path, &pi, dest, (size_t)QUIC_WRITE_PKT_BUFLEN,
+      &ccerr, quic_now());
 
   /* Pre-handshake or otherwise not in a state where CONNECTION_CLOSE can be
      emitted (ngtcp2 returns NGTCP2_ERR_INVALID_STATE). Spec treats this as
@@ -1239,22 +1218,21 @@ quic_conn_close_m(int argc, VALUE *argv, VALUE self)
 
 /* Why an Endpoint closed this connection; see quic_conn_t.error. Always nil
    for a connection no Endpoint made. */
-static VALUE
-quic_conn_error_m(VALUE self)
-{
+static VALUE quic_conn_error_m(VALUE self) {
   return quic_conn_get(self)->error;
 }
 
-void
-quic_conn_define_shared_methods(VALUE klass)
-{
+void quic_conn_define_shared_methods(VALUE klass) {
   rb_define_method(klass, "write_pkt", quic_conn_write_pkt, -1);
-  rb_define_method(klass, "read_pkt",  quic_conn_read_pkt,  -1);
+  rb_define_method(klass, "read_pkt", quic_conn_read_pkt, -1);
   rb_define_method(klass, "expiry", quic_conn_expiry, 0);
   rb_define_method(klass, "handle_expiry", quic_conn_handle_expiry, 0);
-  rb_define_method(klass, "handshake_completed?", quic_conn_handshake_completed_p, 0);
-  rb_define_method(klass, "in_closing_period?", quic_conn_in_closing_period_p, 0);
-  rb_define_method(klass, "in_draining_period?", quic_conn_in_draining_period_p, 0);
+  rb_define_method(klass, "handshake_completed?",
+                   quic_conn_handshake_completed_p, 0);
+  rb_define_method(klass, "in_closing_period?", quic_conn_in_closing_period_p,
+                   0);
+  rb_define_method(klass, "in_draining_period?", quic_conn_in_draining_period_p,
+                   0);
   rb_define_method(klass, "open_bidi_stream", quic_conn_open_bidi_stream, 0);
   rb_define_method(klass, "open_uni_stream", quic_conn_open_uni_stream, 0);
   rb_define_method(klass, "close", quic_conn_close_m, -1);
