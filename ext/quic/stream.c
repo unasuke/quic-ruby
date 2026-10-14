@@ -5,37 +5,33 @@
 
 VALUE rb_cQUICStream;
 
-static void
-quic_stream_free(void *ptr)
-{
-  xfree(ptr);
-}
+static void quic_stream_free(void *ptr) { xfree(ptr); }
 
-static size_t
-quic_stream_size(const void *ptr)
-{
+static size_t quic_stream_size(const void *ptr) {
   (void)ptr;
   return sizeof(quic_stream_t);
 }
 
 const rb_data_type_t quic_stream_data_type = {
-  "QUIC::Stream",
-  {NULL, quic_stream_free, quic_stream_size,},
-  NULL, NULL,
-  RUBY_TYPED_FREE_IMMEDIATELY,
+    "QUIC::Stream",
+    {
+        NULL,
+        quic_stream_free,
+        quic_stream_size,
+    },
+    NULL,
+    NULL,
+    RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-static VALUE
-quic_stream_alloc(VALUE klass)
-{
+static VALUE quic_stream_alloc(VALUE klass) {
   quic_stream_t *s = ALLOC(quic_stream_t);
   memset(s, 0, sizeof(*s));
   return TypedData_Wrap_Struct(klass, &quic_stream_data_type, s);
 }
 
 VALUE
-quic_stream_new(int64_t stream_id, VALUE owner)
-{
+quic_stream_new(int64_t stream_id, VALUE owner) {
   VALUE self = quic_stream_alloc(rb_cQUICStream);
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
@@ -55,9 +51,7 @@ quic_stream_new(int64_t stream_id, VALUE owner)
    quic_stream_write_nonblock_m). This helper is reached only after the
    caller has confirmed the bytes fit in the current send window, so it
    never raises QUIC::Error::WaitWritable on its own. */
-static VALUE
-quic_stream_enqueue(VALUE self, VALUE data, bool fin)
-{
+static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
@@ -87,12 +81,11 @@ quic_stream_enqueue(VALUE self, VALUE data, bool fin)
   return LONG2NUM(len);
 }
 
-static bool
-quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data)
-{
+static bool quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data) {
   VALUE opts = Qnil;
   rb_scan_args(argc, argv, "1:", data, &opts);
-  if (NIL_P(opts)) return false;
+  if (NIL_P(opts))
+    return false;
   VALUE fin = rb_hash_lookup(opts, ID2SYM(rb_intern("fin")));
   return RTEST(fin);
 }
@@ -102,11 +95,11 @@ quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data)
    the bytes already queued in @pending_chunks but not yet handed to ngtcp2.
    ngtcp2 only counts what it has sent, so without the subtraction a run of
    writes could queue far more than the peer allows. */
-static uint64_t
-quic_stream_window_left(VALUE self, VALUE client_v, quic_stream_t *s)
-{
+static uint64_t quic_stream_window_left(VALUE self, VALUE client_v,
+                                        quic_stream_t *s) {
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
-  uint64_t stream_left = ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
+  uint64_t stream_left =
+      ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
   uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
   uint64_t left = stream_left < conn_left ? stream_left : conn_left;
 
@@ -126,15 +119,13 @@ quic_stream_window_left(VALUE self, VALUE client_v, quic_stream_t *s)
    for the full payload, then enqueue. IO#write-compatible: always queues all
    of `data`. Bare Streams (built via QUIC::Stream.allocate for unit tests,
    with @client = nil) skip the window check entirely. */
-static VALUE
-quic_stream_write_m(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_stream_write_m(int argc, VALUE *argv, VALUE self) {
   VALUE data;
   bool fin = quic_stream_fin_kwarg(argc, argv, &data);
 
   VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
   if (NIL_P(client_v)) {
-    return quic_stream_enqueue(self, data, fin);  /* bare-Stream test escape */
+    return quic_stream_enqueue(self, data, fin); /* bare-Stream test escape */
   }
 
   /* These will be re-validated by quic_stream_enqueue, but we need the
@@ -162,15 +153,13 @@ quic_stream_write_m(int argc, VALUE *argv, VALUE self)
    prefix fits, FIN is NOT set on this call (caller re-issues with
    `fin: true` once the remainder is accepted) so we don't half-commit FIN.
    Bare Streams with @client = nil skip the window check entirely. */
-static VALUE
-quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self) {
   VALUE data;
   bool fin = quic_stream_fin_kwarg(argc, argv, &data);
 
   VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
   if (NIL_P(client_v)) {
-    return quic_stream_enqueue(self, data, fin);  /* bare-Stream test escape */
+    return quic_stream_enqueue(self, data, fin); /* bare-Stream test escape */
   }
 
   Check_Type(data, T_STRING);
@@ -195,12 +184,11 @@ quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self)
   return quic_stream_enqueue(self, slice, effective_fin);
 }
 
-static VALUE
-quic_stream_close_write_m(VALUE self)
-{
+static VALUE quic_stream_close_write_m(VALUE self) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
-  if (s->fin_sent) return Qnil;  /* idempotent */
+  if (s->fin_sent)
+    return Qnil; /* idempotent */
   VALUE empty = rb_str_new("", 0);
   rb_enc_associate_index(empty, rb_ascii8bit_encindex());
   quic_stream_enqueue(self, empty, true);
@@ -215,9 +203,7 @@ quic_stream_close_write_m(VALUE self)
    - buffer empty + !fin_received: raise QUIC::Error::WaitReadable
    - buffer non-empty: return min(length, buffer.bytesize) bytes
 */
-static VALUE
-quic_stream_read_nonblock_m(VALUE self, VALUE length_v)
-{
+static VALUE quic_stream_read_nonblock_m(VALUE self, VALUE length_v) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
@@ -241,7 +227,8 @@ quic_stream_read_nonblock_m(VALUE self, VALUE length_v)
 
   /* Drop the first |take| bytes from buffer by memmove + truncate. */
   if (take < have) {
-    memmove(RSTRING_PTR(buffer), RSTRING_PTR(buffer) + take, (size_t)(have - take));
+    memmove(RSTRING_PTR(buffer), RSTRING_PTR(buffer) + take,
+            (size_t)(have - take));
   }
   rb_str_set_len(buffer, have - take);
 
@@ -253,17 +240,17 @@ quic_stream_read_nonblock_m(VALUE self, VALUE length_v)
   VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
   if (!NIL_P(client_v)) {
     ngtcp2_conn *conn = quic_conn_ptr(client_v);
-    int rv = ngtcp2_conn_extend_max_stream_offset(conn, s->stream_id, (uint64_t)take);
-    if (rv != 0) quic_raise_ngtcp2_error(rv);
+    int rv = ngtcp2_conn_extend_max_stream_offset(conn, s->stream_id,
+                                                  (uint64_t)take);
+    if (rv != 0)
+      quic_raise_ngtcp2_error(rv);
     ngtcp2_conn_extend_max_offset(conn, (uint64_t)take);
   }
 
   return out;
 }
 
-static VALUE
-quic_stream_eof_p(VALUE self)
-{
+static VALUE quic_stream_eof_p(VALUE self) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
   VALUE buffer = rb_ivar_get(self, rb_intern("@recv_buffer"));
@@ -275,17 +262,13 @@ quic_stream_eof_p(VALUE self)
    connection closes first, since ngtcp2 does not report stream closure then.
    Keeps returning true after the stream has left the connection's @streams.
    A bare Stream is never closed. */
-static VALUE
-quic_stream_closed_p(VALUE self)
-{
+static VALUE quic_stream_closed_p(VALUE self) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
   return s->closed ? Qtrue : Qfalse;
 }
 
-static VALUE
-quic_stream_close_read_m(VALUE self)
-{
+static VALUE quic_stream_close_read_m(VALUE self) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
@@ -295,13 +278,12 @@ quic_stream_close_read_m(VALUE self)
   /* ngtcp2_conn_shutdown_stream_read sends STOP_SENDING. app_error_code 0
      since no QUIC-level error API is exposed yet. */
   int rv = ngtcp2_conn_shutdown_stream_read(conn, 0, s->stream_id, 0);
-  if (rv != 0) quic_raise_ngtcp2_error(rv);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
   return Qnil;
 }
 
-static VALUE
-quic_stream_close_m(VALUE self)
-{
+static VALUE quic_stream_close_m(VALUE self) {
   /* Send FIN (if not yet) then STOP_SENDING. Idempotent on each leg. */
   quic_stream_close_write_m(self);
   quic_stream_close_read_m(self);
@@ -318,9 +300,7 @@ quic_stream_close_m(VALUE self)
    A bare Stream (@client == nil, used by unit-test fixtures) skips the
    ngtcp2 call and only flips s->reset, mirroring the #write / #close_write
    bare-Stream escapes. */
-static VALUE
-quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
-{
+static VALUE quic_stream_reset_m(int argc, VALUE *argv, VALUE self) {
   VALUE error_code_v = Qnil;
   rb_scan_args(argc, argv, "01", &error_code_v);
   uint64_t error_code = NIL_P(error_code_v) ? 0 : NUM2ULL(error_code_v);
@@ -328,17 +308,19 @@ quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
-  if (s->reset) return Qnil;  /* idempotent */
+  if (s->reset)
+    return Qnil; /* idempotent */
 
   VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
   if (NIL_P(client_v)) {
-    s->reset = true;  /* bare Stream escape */
+    s->reset = true; /* bare Stream escape */
     return Qnil;
   }
 
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
   int rv = ngtcp2_conn_shutdown_stream_write(conn, 0, s->stream_id, error_code);
-  if (rv != 0) quic_raise_ngtcp2_error(rv);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
   s->reset = true;
   return Qnil;
 }
@@ -346,9 +328,7 @@ quic_stream_reset_m(int argc, VALUE *argv, VALUE self)
 /* Called by #accept_stream / #accept_stream_nonblock for the stream they
    take off @accept_queue. A stream that closed while it waited there gives
    the peer back the stream it used up now (see quic_stream_close_body). */
-static VALUE
-quic_stream_accepted_m(VALUE self)
-{
+static VALUE quic_stream_accepted_m(VALUE self) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
   s->accepted = true;
@@ -362,20 +342,21 @@ quic_stream_accepted_m(VALUE self)
   return Qnil;
 }
 
-void
-Init_quic_stream(VALUE rb_mQUICArg)
-{
+void Init_quic_stream(VALUE rb_mQUICArg) {
   rb_cQUICStream = rb_define_class_under(rb_mQUICArg, "Stream", rb_cObject);
   rb_define_alloc_func(rb_cQUICStream, quic_stream_alloc);
   rb_define_method(rb_cQUICStream, "write", quic_stream_write_m, -1);
-  rb_define_method(rb_cQUICStream, "write_nonblock", quic_stream_write_nonblock_m, -1);
+  rb_define_method(rb_cQUICStream, "write_nonblock",
+                   quic_stream_write_nonblock_m, -1);
   rb_define_method(rb_cQUICStream, "close_write", quic_stream_close_write_m, 0);
-  rb_define_method(rb_cQUICStream, "read_nonblock", quic_stream_read_nonblock_m, 1);
+  rb_define_method(rb_cQUICStream, "read_nonblock", quic_stream_read_nonblock_m,
+                   1);
   rb_define_method(rb_cQUICStream, "eof?", quic_stream_eof_p, 0);
   rb_define_method(rb_cQUICStream, "closed?", quic_stream_closed_p, 0);
   rb_define_method(rb_cQUICStream, "close_read", quic_stream_close_read_m, 0);
   rb_define_method(rb_cQUICStream, "close", quic_stream_close_m, 0);
   rb_define_method(rb_cQUICStream, "reset", quic_stream_reset_m, -1);
-  rb_define_private_method(rb_cQUICStream, "_accepted", quic_stream_accepted_m, 0);
+  rb_define_private_method(rb_cQUICStream, "_accepted", quic_stream_accepted_m,
+                           0);
   /* #read (blocking) and #initiator are defined in lib/quic/stream.rb. */
 }

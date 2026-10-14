@@ -22,11 +22,11 @@ typedef struct {
   /* Cumulative bytes shifted out of @pending_chunks. Always
      <= acked_offset (we only shift a Chunk after its end is acked). */
   uint64_t pending_shifted;
-  bool fin_received;          /* recv_stream_data delivered FIN */
-  bool fin_sent;              /* #write(fin: true) queued FIN */
-  bool fin_flushed;           /* write_pkt actually wrote the FIN frame */
-  bool reset;                 /* stream_reset callback fired */
-  bool closed;                /* stream_close callback fired */
+  bool fin_received; /* recv_stream_data delivered FIN */
+  bool fin_sent;     /* #write(fin: true) queued FIN */
+  bool fin_flushed;  /* write_pkt actually wrote the FIN frame */
+  bool reset;        /* stream_reset callback fired */
+  bool closed;       /* stream_close callback fired */
   uint64_t close_app_error_code;
   bool close_has_app_error_code;
   /* Set once a peer-initiated stream has been pushed onto the owning

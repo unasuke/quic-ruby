@@ -10,14 +10,13 @@
    share across verifications; creation runs under the GVL. Never freed. */
 static X509_STORE *quic_default_store;
 
-static X509_STORE *
-quic_get_default_store(void)
-{
+static X509_STORE *quic_get_default_store(void) {
   if (quic_default_store == NULL) {
     X509_STORE *store = X509_STORE_new();
     if (store == NULL || X509_STORE_set_default_paths(store) != 1) {
       X509_STORE_free(store);
-      rb_raise(rb_eRuntimeError, "failed to load the default certificate store");
+      rb_raise(rb_eRuntimeError,
+               "failed to load the default certificate store");
     }
     quic_default_store = store;
   }
@@ -31,8 +30,7 @@ quic_get_default_store(void)
 static int
 quic_override_verify_cb(ptls_openssl_override_verify_certificate_t *self,
                         ptls_t *tls, int ret, int ossl_ret, X509 *cert,
-                        STACK_OF(X509) *chain)
-{
+                        STACK_OF(X509) * chain) {
   (void)self;
   (void)cert;
   (void)chain;
@@ -46,35 +44,40 @@ quic_override_verify_cb(ptls_openssl_override_verify_certificate_t *self,
 }
 
 static ptls_openssl_override_verify_certificate_t quic_override_verify = {
-  quic_override_verify_cb,
+    quic_override_verify_cb,
 };
 
 /* Install picotls's certificate verifier on c->tls_ctx according to the
    verify_mode / ca_file / ca_path settings. Leaves verify_certificate NULL
    for verify_mode :none, which skips verification altogether. */
-static void
-quic_client_setup_verify(quic_conn_t *c, VALUE settings_v, VALUE server_name)
-{
+static void quic_client_setup_verify(quic_conn_t *c, VALUE settings_v,
+                                     VALUE server_name) {
   VALUE mode = rb_funcall(settings_v, rb_intern("verify_mode"), 0);
   /* ca_file and ca_path are not even type-checked under :none. */
-  if (mode == ID2SYM(rb_intern("none"))) return;
+  if (mode == ID2SYM(rb_intern("none")))
+    return;
   if (mode != ID2SYM(rb_intern("peer"))) {
-    rb_raise(rb_eArgError, "verify_mode must be :peer or :none (got %+"PRIsVALUE")", mode);
+    rb_raise(rb_eArgError,
+             "verify_mode must be :peer or :none (got %+" PRIsVALUE ")", mode);
   }
 
-  VALUE ca_file = quic_path_value(rb_funcall(settings_v, rb_intern("ca_file"), 0), "ca_file");
-  VALUE ca_path = quic_path_value(rb_funcall(settings_v, rb_intern("ca_path"), 0), "ca_path");
+  VALUE ca_file = quic_path_value(
+      rb_funcall(settings_v, rb_intern("ca_file"), 0), "ca_file");
+  VALUE ca_path = quic_path_value(
+      rb_funcall(settings_v, rb_intern("ca_path"), 0), "ca_path");
 
   /* An empty name makes OpenSSL clear its host list and skip the name check,
      and both SNI and the check would silently stop at an embedded NUL. */
   if (RSTRING_LEN(server_name) == 0 ||
-      memchr(RSTRING_PTR(server_name), '\0', (size_t)RSTRING_LEN(server_name)) != NULL) {
-    rb_raise(rb_eArgError,
-             "server_name must be a non-empty string without NUL bytes when verify_mode is :peer");
+      memchr(RSTRING_PTR(server_name), '\0',
+             (size_t)RSTRING_LEN(server_name)) != NULL) {
+    rb_raise(rb_eArgError, "server_name must be a non-empty string without NUL "
+                           "bytes when verify_mode is :peer");
   }
   /* X509_LOOKUP_hash_dir does not check that the directory exists. */
-  if (!NIL_P(ca_path) && !RTEST(rb_funcall(rb_cFile, rb_intern("directory?"), 1, ca_path))) {
-    rb_raise(rb_eArgError, "ca_path is not a directory: %"PRIsVALUE, ca_path);
+  if (!NIL_P(ca_path) &&
+      !RTEST(rb_funcall(rb_cFile, rb_intern("directory?"), 1, ca_path))) {
+    rb_raise(rb_eArgError, "ca_path is not a directory: %" PRIsVALUE, ca_path);
   }
 
   X509_STORE *store;
@@ -85,17 +88,17 @@ quic_client_setup_verify(quic_conn_t *c, VALUE settings_v, VALUE server_name)
     if (store == NULL) {
       rb_raise(rb_eRuntimeError, "X509_STORE_new failed");
     }
-    if (X509_STORE_load_locations(store,
-                                  NIL_P(ca_file) ? NULL : RSTRING_PTR(ca_file),
-                                  NIL_P(ca_path) ? NULL : RSTRING_PTR(ca_path)) != 1) {
+    if (X509_STORE_load_locations(
+            store, NIL_P(ca_file) ? NULL : RSTRING_PTR(ca_file),
+            NIL_P(ca_path) ? NULL : RSTRING_PTR(ca_path)) != 1) {
       X509_STORE_free(store);
       /* libcrypto is shared with Ruby's openssl extension; do not leave our
          failure on its error queue. */
       ERR_clear_error();
       if (NIL_P(ca_file)) {
-        rb_raise(rb_eArgError, "failed to load ca_path: %"PRIsVALUE, ca_path);
+        rb_raise(rb_eArgError, "failed to load ca_path: %" PRIsVALUE, ca_path);
       }
-      rb_raise(rb_eArgError, "failed to load ca_file: %"PRIsVALUE, ca_file);
+      rb_raise(rb_eArgError, "failed to load ca_file: %" PRIsVALUE, ca_file);
     }
   } else {
     store = quic_get_default_store();
@@ -103,7 +106,8 @@ quic_client_setup_verify(quic_conn_t *c, VALUE settings_v, VALUE server_name)
 
   /* init takes its own reference on the store, so ours can go right away. */
   int rv = ptls_openssl_init_verify_certificate(&c->verify_cert, store);
-  if (own_store) X509_STORE_free(store);
+  if (own_store)
+    X509_STORE_free(store);
   if (rv != 0) {
     rb_raise(rb_eRuntimeError, "ptls_openssl_init_verify_certificate failed");
   }
@@ -112,29 +116,31 @@ quic_client_setup_verify(quic_conn_t *c, VALUE settings_v, VALUE server_name)
   c->tls_ctx.verify_certificate = &c->verify_cert.super;
 }
 
-static VALUE
-quic_client_open(int argc, VALUE *argv, VALUE klass)
-{
+static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
   VALUE opts = Qnil;
   rb_scan_args(argc, argv, "0:", &opts);
   if (NIL_P(opts)) {
-    rb_raise(rb_eArgError,
-             "missing keywords: local_sockaddr, remote_sockaddr, server_name, transport_params, settings");
+    rb_raise(rb_eArgError, "missing keywords: local_sockaddr, remote_sockaddr, "
+                           "server_name, transport_params, settings");
   }
 
-  VALUE local_sockaddr   = rb_hash_aref(opts, ID2SYM(rb_intern("local_sockaddr")));
-  VALUE remote_sockaddr  = rb_hash_aref(opts, ID2SYM(rb_intern("remote_sockaddr")));
-  VALUE server_name      = rb_hash_aref(opts, ID2SYM(rb_intern("server_name")));
-  VALUE transport_params = rb_hash_aref(opts, ID2SYM(rb_intern("transport_params")));
-  VALUE settings_v       = rb_hash_aref(opts, ID2SYM(rb_intern("settings")));
+  VALUE local_sockaddr =
+      rb_hash_aref(opts, ID2SYM(rb_intern("local_sockaddr")));
+  VALUE remote_sockaddr =
+      rb_hash_aref(opts, ID2SYM(rb_intern("remote_sockaddr")));
+  VALUE server_name = rb_hash_aref(opts, ID2SYM(rb_intern("server_name")));
+  VALUE transport_params =
+      rb_hash_aref(opts, ID2SYM(rb_intern("transport_params")));
+  VALUE settings_v = rb_hash_aref(opts, ID2SYM(rb_intern("settings")));
 
   if (NIL_P(local_sockaddr) || NIL_P(remote_sockaddr) || NIL_P(server_name) ||
       NIL_P(transport_params) || NIL_P(settings_v)) {
     rb_raise(rb_eArgError,
-             "all keywords required: local_sockaddr, remote_sockaddr, server_name, transport_params, settings");
+             "all keywords required: local_sockaddr, remote_sockaddr, "
+             "server_name, transport_params, settings");
   }
 
-  quic_require_sockaddr(local_sockaddr,  "local_sockaddr");
+  quic_require_sockaddr(local_sockaddr, "local_sockaddr");
   quic_require_sockaddr(remote_sockaddr, "remote_sockaddr");
   Check_Type(server_name, T_STRING);
 
@@ -153,17 +159,18 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
      the ngtcp2-side initialization explicit and the TLS setup in one place. */
   ngtcp2_crypto_picotls_ctx_init(&c->cptls);
   c->tls_ctx = (ptls_context_t){
-    .random_bytes = ptls_openssl_random_bytes,
-    .get_time = &ptls_get_time,
-    .key_exchanges = quic_key_exchanges,
-    .cipher_suites = quic_cipher_suites,
-    /* No session resumption yet, so this has no effect today. Keep it so that
-       when resumption is added, PSK-only (non-forward-secret) resumption is
-       refused rather than silently accepted. */
-    .require_dhe_on_psk = 1,
+      .random_bytes = ptls_openssl_random_bytes,
+      .get_time = &ptls_get_time,
+      .key_exchanges = quic_key_exchanges,
+      .cipher_suites = quic_cipher_suites,
+      /* No session resumption yet, so this has no effect today. Keep it so that
+         when resumption is added, PSK-only (non-forward-secret) resumption is
+         refused rather than silently accepted. */
+      .require_dhe_on_psk = 1,
   };
   if (ngtcp2_crypto_picotls_configure_client_context(&c->tls_ctx) != 0) {
-    rb_raise(rb_eRuntimeError, "ngtcp2_crypto_picotls_configure_client_context failed");
+    rb_raise(rb_eRuntimeError,
+             "ngtcp2_crypto_picotls_configure_client_context failed");
   }
 
   /* ptls_client_new keeps a pointer to tls_ctx, so the verifier has to be in
@@ -195,14 +202,16 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
   quic_fill_transport_params(&params, transport_params);
 
   ngtcp2_path path = {
-    {(struct sockaddr *)RSTRING_PTR(local_sockaddr),  (ngtcp2_socklen)RSTRING_LEN(local_sockaddr)},
-    {(struct sockaddr *)RSTRING_PTR(remote_sockaddr), (ngtcp2_socklen)RSTRING_LEN(remote_sockaddr)},
-    NULL,
+      {(struct sockaddr *)RSTRING_PTR(local_sockaddr),
+       (ngtcp2_socklen)RSTRING_LEN(local_sockaddr)},
+      {(struct sockaddr *)RSTRING_PTR(remote_sockaddr),
+       (ngtcp2_socklen)RSTRING_LEN(remote_sockaddr)},
+      NULL,
   };
 
   int rv = ngtcp2_conn_client_new(&c->conn, &c->dcid, &c->scid, &path,
-                                  NGTCP2_PROTO_VER_V1, &callbacks,
-                                  &settings, &params, NULL, c);
+                                  NGTCP2_PROTO_VER_V1, &callbacks, &settings,
+                                  &params, NULL, c);
   if (rv != 0) {
     quic_raise_ngtcp2_error(rv);
   }
@@ -222,10 +231,12 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
   c->tls_exts[1].type = UINT16_MAX;
   c->cptls.handshake_properties.additional_extensions = c->tls_exts;
   if (ngtcp2_crypto_picotls_configure_client_session(&c->cptls, c->conn) != 0) {
-    rb_raise(rb_eRuntimeError, "ngtcp2_crypto_picotls_configure_client_session failed");
+    rb_raise(rb_eRuntimeError,
+             "ngtcp2_crypto_picotls_configure_client_session failed");
   }
   c->cptls.handshake_properties.client.negotiated_protocols.list = c->alpn;
-  c->cptls.handshake_properties.client.negotiated_protocols.count = c->alpn_count;
+  c->cptls.handshake_properties.client.negotiated_protocols.count =
+      c->alpn_count;
   /* ptls_set_server_name copies the name. */
   if (ptls_set_server_name(c->cptls.ptls, RSTRING_PTR(server_name),
                            (size_t)RSTRING_LEN(server_name)) != 0) {
@@ -246,11 +257,11 @@ quic_client_open(int argc, VALUE *argv, VALUE klass)
   return self;
 }
 
-void
-Init_quic_connection_client(VALUE rb_mQUICConnectionArg)
-{
-  rb_cQUICConnectionClient = rb_define_class_under(rb_mQUICConnectionArg, "Client", rb_cObject);
+void Init_quic_connection_client(VALUE rb_mQUICConnectionArg) {
+  rb_cQUICConnectionClient =
+      rb_define_class_under(rb_mQUICConnectionArg, "Client", rb_cObject);
   rb_define_alloc_func(rb_cQUICConnectionClient, quic_conn_alloc);
-  rb_define_singleton_method(rb_cQUICConnectionClient, "_open", quic_client_open, -1);
+  rb_define_singleton_method(rb_cQUICConnectionClient, "_open",
+                             quic_client_open, -1);
   quic_conn_define_shared_methods(rb_cQUICConnectionClient);
 }
