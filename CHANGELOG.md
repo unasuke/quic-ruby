@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### Added
+- `examples/echo_endpoint_demo.rb`, the echo server for `examples/echo_demo.rb` on a `QUIC::Endpoint`. It serves many clients at once from an I/O loop of its own, and writes qlog when `QUIC_ECHO_QLOG_DIR` is set. ([#18](https://github.com/unasuke/quic-ruby/pull/18))
+- The README documents `QUIC::Endpoint`, `QUIC::TLSContext`, `Settings#qlog_dir` and `quic/ext.h`. Its Limitations no longer say that a server handles one connection per socket, and list instead the lack of Retry and address validation, and of client certificate authentication. ([#18](https://github.com/unasuke/quic-ruby/pull/18))
+
 ## [0.0.3] - 2026-10-13
 
 ### Added
