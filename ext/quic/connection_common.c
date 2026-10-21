@@ -1124,10 +1124,11 @@ static VALUE quic_conn_open_uni_stream(VALUE self) {
 
 /* Send an application CONNECTION_CLOSE (frame type 0x1d) to the peer and
    transition the underlying ngtcp2_conn to the closing period. One UDP
-   datagram is written to the bound socket; ngtcp2 handles closing-period
-   retransmits via the caller's pump loop. Calling #close on a connection
-   that is already in the closing or draining period is a no-op (= returns
-   nil without doing any I/O). */
+   datagram is written to the bound socket, once: nothing sends it again
+   for packets the peer keeps sending (an Endpoint does, for its own
+   connections), and #write_pkt raises QUIC::Error::Closed from here on.
+   Calling #close on a connection that is already in the closing or
+   draining period is a no-op (= returns nil without doing any I/O). */
 static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
   VALUE opts = Qnil;
   rb_scan_args(argc, argv, "0:", &opts);
