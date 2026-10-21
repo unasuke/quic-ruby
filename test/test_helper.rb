@@ -133,6 +133,12 @@ module TestEndpointNetwork
     CLIENT_LOCAL_SOCKADDR = Addrinfo.udp("0.0.0.0", 0).to_sockaddr
     TIMEOUT = 10
 
+    # Stands in for the socket Client#close sends its CONNECTION_CLOSE
+    # through, and hands that packet to the Endpoint instead.
+    Relay = Struct.new(:endpoint, :remote) do
+      def send(packet, _flags) = endpoint.read_pkt(packet, remote: remote)
+    end
+
     attr_reader :endpoint
     # Called with each packet the Endpoint sends and the Client it is for;
     # true drops the packet.
@@ -166,6 +172,12 @@ module TestEndpointNetwork
     # network stops driving a client once it has raised.
     def error_of(client)
       @errors[client]
+    end
+
+    # client#close, with its CONNECTION_CLOSE handed to the Endpoint. A
+    # Client of the network has no socket to send it through.
+    def close_client(client, **opts)
+      client.bind(Relay.new(@endpoint, address_of(client))).close(**opts)
     end
 
     # Hand every waiting packet over once in each direction, then run the
@@ -323,6 +335,39 @@ module TestCertificates
   # Writes #self_signed_ca_pem into dir and returns the file path.
   def write_ca_file(dir)
     File.join(dir, "ca.pem").tap { |path| File.write(path, self_signed_ca_pem) }
+  end
+end
+
+# Whether a connection's qlog file was closed when the connection ended,
+# rather than left open for GC.
+module TestQlog
+  # Run the block with GC off, so that GC cannot close a qlog file by
+  # collecting its connection.
+  def without_gc
+    disabled = GC.disable
+    yield
+  ensure
+    GC.enable unless disabled
+  end
+
+  # The qlog file at path has been closed: it ends with a whole record and,
+  # unless connection_close is false, holds the CONNECTION_CLOSE, which an
+  # unflushed stdio buffer would still keep back. Where /proc/self/fd
+  # exists, no descriptor of this process may refer to it either.
+  def assert_qlog_closed(path, connection_close: true)
+    qlog = File.binread(path)
+    assert qlog.end_with?("\n"), "#{path} ends with a whole record"
+    if connection_close
+      assert qlog.include?(%("frame_type":"connection_close")), "#{path} holds the CONNECTION_CLOSE"
+    end
+    return unless File.directory?("/proc/self/fd")
+
+    open_paths = Dir.children("/proc/self/fd").filter_map do |fd|
+      File.readlink(File.join("/proc/self/fd", fd))
+    rescue SystemCallError
+      nil # the descriptor Dir.children itself had open
+    end
+    refute_includes open_paths, File.realpath(path), "no descriptor refers to #{path}"
   end
 end
 

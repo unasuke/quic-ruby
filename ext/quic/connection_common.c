@@ -49,8 +49,7 @@ static void quic_conn_free(void *ptr) {
   if (c->tls != NULL)
     quic_tls_ctx_unref(c->tls);
   /* Still open only when no ngtcp2_conn was made to finish it. */
-  if (c->qlog != NULL)
-    fclose(c->qlog);
+  quic_conn_close_qlog(c);
   xfree(c->alpn);
   xfree(c->alpn_buf);
   xfree(c);
@@ -280,10 +279,15 @@ static void quic_qlog_write_cb(void *user_data, uint32_t flags,
   if (c->qlog == NULL)
     return;
   fwrite(data, 1, datalen, c->qlog);
-  if (flags & NGTCP2_QLOG_WRITE_FLAG_FIN) {
-    fclose(c->qlog);
-    c->qlog = NULL;
-  }
+  if (flags & NGTCP2_QLOG_WRITE_FLAG_FIN)
+    quic_conn_close_qlog(c);
+}
+
+void quic_conn_close_qlog(quic_conn_t *c) {
+  if (c->qlog == NULL)
+    return;
+  fclose(c->qlog);
+  c->qlog = NULL;
 }
 
 void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v,

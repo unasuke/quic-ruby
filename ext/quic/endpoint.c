@@ -440,6 +440,8 @@ static void quic_endpoint_detach(quic_endpoint_t *ep, VALUE conn,
 
   c->endpoint = NULL;
   c->endpoint_owner = Qnil;
+  /* The Endpoint never drives the connection again. */
+  quic_conn_close_qlog(c);
 }
 
 /* Take conn out of the table and hand it to #take_closed. */
