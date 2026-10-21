@@ -1001,6 +1001,9 @@ static VALUE quic_read_pkt_body(VALUE arg) {
   int rv = quic_conn_read_pkt_raw(a->c, &a->path,
                                   (const uint8_t *)RSTRING_PTR(a->packet),
                                   (size_t)RSTRING_LEN(a->packet));
+  /* The peer closed or reset the connection; ngtcp2 logs nothing more. */
+  if (ngtcp2_conn_in_draining_period2(a->c->conn))
+    quic_conn_close_qlog(a->c);
   quic_conn_raise_pending(a->c);
   if (rv != 0) {
     /* longjmp passes through rb_ensure so unlock still fires. */
@@ -1082,6 +1085,9 @@ static VALUE quic_conn_handle_expiry(VALUE self) {
   quic_conn_t *c = quic_conn_get(self);
   c->now = quic_now();
   int rv = ngtcp2_conn_handle_expiry(c->conn, c->now);
+  /* Timed out idle: the connection ends without a CONNECTION_CLOSE. */
+  if (rv == NGTCP2_ERR_IDLE_CLOSE)
+    quic_conn_close_qlog(c);
   quic_conn_raise_pending(c);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
@@ -1198,6 +1204,9 @@ static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
   ngtcp2_ssize n = ngtcp2_conn_write_connection_close(
       c->conn, &path_storage.path, &pi, dest, (size_t)QUIC_WRITE_PKT_BUFLEN,
       &ccerr, quic_now());
+  /* The connection ends here whatever ngtcp2 returned, and the
+     CONNECTION_CLOSE, if one was built, is in the qlog already. */
+  quic_conn_close_qlog(c);
 
   /* Pre-handshake or otherwise not in a state where CONNECTION_CLOSE can be
      emitted (ngtcp2 returns NGTCP2_ERR_INVALID_STATE). Spec treats this as

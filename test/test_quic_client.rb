@@ -5,6 +5,7 @@ require "test_helper"
 class TestQUICClient < Minitest::Test
   include TestCertificates
   include TestStreams
+  include TestQlog
 
   def test_connection_client_initializes
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
@@ -108,6 +109,32 @@ class TestQUICClient < Minitest::Test
       QUIC::Connection::Client.new(host: "127.0.0.1", port: 443, settings: QUIC::Settings.default.with(qlog_dir: dir))
       assert_equal 1, Dir.children(dir).size
       assert_match(/\A\h{16}\.sqlog\z/, Dir.children(dir).first)
+    end
+  end
+
+  # A Client nobody answers times out idle, after max(max_idle_timeout,
+  # 3 PTO): about 100 ms here. Its qlog file is closed by then, without
+  # waiting for GC.
+  def test_idle_timeout_closes_the_qlog_file
+    without_gc do
+      Dir.mktmpdir do |dir|
+        client = QUIC::Connection::Client.new(
+          host: "127.0.0.1", port: 443,
+          transport_params: QUIC::TransportParams.default.with(max_idle_timeout: 100_000_000),
+          settings: QUIC::Settings.default.with(initial_rtt: 10_000_000, qlog_dir: dir)
+        )
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+        assert_raises(QUIC::Error::Closed) do
+          loop do
+            flunk "no idle timeout within 5 seconds" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            loop { break if client.write_pkt.nil? } # into the void
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+            sleep([client.expiry - now, 0].max / 1e9)
+            client.handle_expiry
+          end
+        end
+        assert_qlog_closed(File.join(dir, Dir.children(dir).first), connection_close: false)
+      end
     end
   end
 
