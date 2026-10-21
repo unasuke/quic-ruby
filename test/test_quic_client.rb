@@ -138,6 +138,23 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  # Transport parameters are read before the qlog file is opened, so a bad
+  # one leaves no file behind, open or not.
+  def test_new_with_invalid_transport_params_leaves_no_qlog_file
+    without_gc do
+      Dir.mktmpdir do |dir|
+        assert_raises(TypeError) do
+          QUIC::Connection::Client.new(
+            host: "127.0.0.1", port: 443,
+            transport_params: QUIC::TransportParams.default.with(initial_max_data: "x"),
+            settings: QUIC::Settings.default.with(qlog_dir: dir)
+          )
+        end
+        assert_empty Dir.children(dir)
+      end
+    end
+  end
+
   # ngtcp2 copies an address by its length into room for a sockaddr_in6, so
   # only an AF_INET or AF_INET6 sockaddr of its exact size may get through.
   def test_read_pkt_raises_on_anything_but_an_inet_sockaddr

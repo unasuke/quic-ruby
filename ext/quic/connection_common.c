@@ -48,7 +48,8 @@ static void quic_conn_free(void *ptr) {
     ptls_openssl_dispose_verify_certificate(&c->verify_cert);
   if (c->tls != NULL)
     quic_tls_ctx_unref(c->tls);
-  /* Still open only when no ngtcp2_conn was made to finish it. */
+  /* Still open only if no ngtcp2_conn was made to finish it; the
+     constructors close it before raising, so this is a safety net. */
   quic_conn_close_qlog(c);
   xfree(c->alpn);
   xfree(c->alpn_buf);
