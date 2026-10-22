@@ -143,7 +143,7 @@ settings = QUIC::Settings.default.with(alpn: ["perf"], verify_mode: :none)
 settings = QUIC::Settings.default.with(alpn: ["h3"], qlog_dir: "/tmp/qlog")
 ```
 
-It applies to clients, `Connection::Server.accept` and every connection of an Endpoint. `Client.new`, `Server.accept` and `Endpoint.new` raise `ArgumentError` unless it is a writable directory. A file that cannot be opened later, when a connection is made, only costs that connection its qlog.
+It applies to clients, `Connection::Server.accept` and every connection of an Endpoint. `Client.new`, `Server.accept` and `Endpoint.new` raise `ArgumentError` unless it is a writable directory. A file that cannot be opened later, when a connection is made, only costs that connection its qlog. A connection's file is closed as soon as the connection ends, not when the connection is garbage collected.
 
 ### From other native extensions
 

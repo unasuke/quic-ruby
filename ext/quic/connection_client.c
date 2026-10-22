@@ -196,10 +196,13 @@ static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
 
   ngtcp2_settings settings;
   quic_fill_settings(&settings, settings_v);
-  quic_conn_open_qlog(c, settings_v, &settings);
 
   ngtcp2_transport_params params;
   quic_fill_transport_params(&params, transport_params);
+
+  /* Opened once the caller's values have all been read, so that a bad one
+     leaves no file behind. Every raise below closes it first. */
+  quic_conn_open_qlog(c, settings_v, &settings);
 
   ngtcp2_path path = {
       {(struct sockaddr *)RSTRING_PTR(local_sockaddr),
@@ -213,6 +216,7 @@ static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
                                   NGTCP2_PROTO_VER_V1, &callbacks, &settings,
                                   &params, NULL, c);
   if (rv != 0) {
+    quic_conn_close_qlog(c);
     quic_raise_ngtcp2_error(rv);
   }
 
@@ -220,6 +224,7 @@ static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
      transport parameters from the conn, so it needs the conn to exist. */
   c->cptls.ptls = ptls_client_new(&c->tls_ctx);
   if (c->cptls.ptls == NULL) {
+    quic_conn_close_qlog(c);
     rb_raise(rb_eRuntimeError, "ptls_client_new failed");
   }
   /* Let ngtcp2's crypto callbacks (add_handshake_data,
@@ -231,6 +236,7 @@ static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
   c->tls_exts[1].type = UINT16_MAX;
   c->cptls.handshake_properties.additional_extensions = c->tls_exts;
   if (ngtcp2_crypto_picotls_configure_client_session(&c->cptls, c->conn) != 0) {
+    quic_conn_close_qlog(c);
     rb_raise(rb_eRuntimeError,
              "ngtcp2_crypto_picotls_configure_client_session failed");
   }
@@ -240,6 +246,7 @@ static VALUE quic_client_open(int argc, VALUE *argv, VALUE klass) {
   /* ptls_set_server_name copies the name. */
   if (ptls_set_server_name(c->cptls.ptls, RSTRING_PTR(server_name),
                            (size_t)RSTRING_LEN(server_name)) != 0) {
+    quic_conn_close_qlog(c);
     rb_raise(rb_eRuntimeError, "ptls_set_server_name failed");
   }
 

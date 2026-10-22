@@ -66,6 +66,7 @@ quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd,
 
   ngtcp2_settings settings;
   quic_fill_settings(&settings, settings_v);
+  /* Every raise below closes it first. */
   quic_conn_open_qlog(c, settings_v, &settings);
 
   c->conn_ref.get_conn = quic_conn_get_conn;
@@ -75,11 +76,13 @@ quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd,
       ngtcp2_conn_server_new(&c->conn, &c->dcid, &c->scid, path, hd->version,
                              &callbacks, &settings, &params, NULL, c);
   if (rv != 0) {
+    quic_conn_close_qlog(c);
     quic_raise_ngtcp2_error(rv);
   }
 
   c->cptls.ptls = ptls_server_new(&c->tls->ctx);
   if (c->cptls.ptls == NULL) {
+    quic_conn_close_qlog(c);
     rb_raise(rb_eRuntimeError, "ptls_server_new failed");
   }
   /* Let ngtcp2's crypto callbacks resolve the ngtcp2_conn from the ptls_t. */
@@ -90,6 +93,7 @@ quic_server_conn_new(VALUE klass, const ngtcp2_pkt_hd *hd,
   c->tls_exts[1].type = UINT16_MAX;
   c->cptls.handshake_properties.additional_extensions = c->tls_exts;
   if (ngtcp2_crypto_picotls_configure_server_session(&c->cptls) != 0) {
+    quic_conn_close_qlog(c);
     rb_raise(rb_eRuntimeError,
              "ngtcp2_crypto_picotls_configure_server_session failed");
   }

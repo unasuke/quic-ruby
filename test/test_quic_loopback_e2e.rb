@@ -10,6 +10,7 @@ require "socket"
 class TestQUICLoopbackE2E < Minitest::Test
   include TestCertificates
   include TestLoopback
+  include TestQlog
 
   ALPN = ["perf"].freeze
 
@@ -46,6 +47,51 @@ class TestQUICLoopbackE2E < Minitest::Test
         qlog = File.binread(File.join(qlog_dir, files.first))
         assert qlog.start_with?("\x1e".b), "qlog is a JSON text sequence"
         assert_includes qlog, "qlog_version"
+      end
+    end
+  end
+
+  # #close closes the Client's qlog file, and the CONNECTION_CLOSE that puts
+  # the Server in its draining period closes the Server's, without waiting
+  # for GC.
+  def test_close_and_draining_close_the_qlog_files
+    without_gc do
+      Dir.mktmpdir do |dir|
+        server_dir = File.join(dir, "server")
+        client_dir = File.join(dir, "client")
+        Dir.mkdir(server_dir)
+        Dir.mkdir(client_dir)
+        creds = loopback_credentials
+        server_sock, port = bind_server_socket
+        server_thread = start_server_thread do
+          server = QUIC::Connection::Server.accept(
+            sock: server_sock,
+            certificate_path: creds.certificate_path,
+            private_key_path: creds.private_key_path,
+            settings: QUIC::Settings.default.with(alpn: ALPN, qlog_dir: server_dir)
+          )
+          server.run
+          server.pump_until { false }
+        rescue QUIC::Error::Closed
+          # The client closed the connection.
+        end
+
+        client = QUIC::Connection::Client.new(
+          host: "127.0.0.1", port: port, address_family: :inet,
+          settings: QUIC::Settings.default.with(alpn: ALPN, ca_file: creds.ca_file, qlog_dir: client_dir)
+        )
+        sock = UDPSocket.new(Socket::AF_INET)
+        sock.connect(client.remote_address.ip_address, client.remote_address.ip_port)
+        client.bind(sock).run
+        client.close
+        assert_qlog_closed(File.join(client_dir, Dir.children(client_dir).first))
+
+        finish_server(server_thread)
+        assert_qlog_closed(File.join(server_dir, Dir.children(server_dir).first))
+      ensure
+        sock&.close
+        server_sock&.close
+        stop_server(server_thread)
       end
     end
   end

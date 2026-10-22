@@ -7,6 +7,7 @@ require "test_helper"
 class TestQUICEndpoint < Minitest::Test
   include TestCertificates
   include TestEndpointNetwork
+  include TestQlog
 
   ALPN = ["h3"].freeze
 
@@ -234,6 +235,39 @@ class TestQUICEndpoint < Minitest::Test
       net.run_until { client.handshake_completed? }
       assert_equal 1, net.endpoint.connections.size
       refute Dir.exist?(qlog_dir)
+    end
+  end
+
+  # A connection the peer closed is done with its qlog file by the time
+  # #take_closed hands it out, without waiting for GC.
+  def test_qlog_file_is_closed_when_the_connection_leaves_the_table
+    without_gc do
+      Dir.mktmpdir do |dir|
+        net = endpoint_network(tls_context, settings: QUIC::Settings.default.with(qlog_dir: dir))
+        client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+        net.run_until { client.handshake_completed? && net.endpoint.connections.first&.handshake_completed? }
+        server = net.endpoint.connections.first
+
+        net.close_client(client)
+        closed = []
+        net.run_until { closed.concat(net.endpoint.take_closed).include?(server) }
+        # Only the Endpoint's connections write qlog here.
+        assert_qlog_closed(File.join(dir, Dir.children(dir).first))
+      end
+    end
+  end
+
+  # A connection whose handshake fails never joins the table, and nothing
+  # refers to it afterwards; its qlog file is closed all the same.
+  def test_qlog_file_of_a_failed_handshake_is_closed
+    without_gc do
+      Dir.mktmpdir do |dir|
+        net = endpoint_network(tls_context, settings: QUIC::Settings.default.with(qlog_dir: dir))
+        client = net.connect(alpn: ["other"], ca_file: loopback_credentials.ca_file)
+        net.run_until { net.error_of(client) }
+        assert_empty net.endpoint.connections
+        assert_qlog_closed(File.join(dir, Dir.children(dir).first))
+      end
     end
   end
 

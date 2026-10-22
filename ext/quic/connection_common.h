@@ -87,8 +87,9 @@ typedef struct {
      recv_stream_data queues for #accept_stream. */
   bool is_server;
   /* <qlog_dir>/<SCID>.sqlog while ngtcp2 writes qlog to it, else NULL.
-     Closed on NGTCP2_QLOG_WRITE_FLAG_FIN, which ngtcp2_conn_del sends at
-     the latest. */
+     quic_conn_close_qlog closes it as soon as the connection ends;
+     NGTCP2_QLOG_WRITE_FLAG_FIN, sent by ngtcp2_conn_del, closes one still
+     open when the connection is freed. */
   FILE *qlog;
   /* The rest is for a connection a QUIC::Endpoint made, and stays zero (nil)
      otherwise. endpoint is the Endpoint whose table holds this connection,
@@ -205,6 +206,11 @@ void quic_fill_settings(ngtcp2_settings *settings, VALUE st);
    directory when the connection or Endpoint was set up. */
 void quic_conn_open_qlog(quic_conn_t *c, VALUE settings_v,
                          ngtcp2_settings *settings);
+
+/* Close c's qlog file, if open. Called wherever the connection ends, so
+   that the file does not wait for GC; what ngtcp2 logs afterwards goes
+   nowhere. */
+void quic_conn_close_qlog(quic_conn_t *c);
 
 /* Zero *callbacks and fill in everything both endpoints share. The caller
    adds the endpoint specific ones (client_initial / recv_retry, or
