@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.0.4] - 2026-10-22
 
 ### Added
 - `examples/echo_endpoint_demo.rb`, the echo server for `examples/echo_demo.rb` on a `QUIC::Endpoint`. It serves many clients at once from an I/O loop of its own, and writes qlog when `QUIC_ECHO_QLOG_DIR` is set. ([#18](https://github.com/unasuke/quic-ruby/pull/18))
