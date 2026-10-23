@@ -45,6 +45,19 @@ quic_stream_new(int64_t stream_id, VALUE owner) {
   return self;
 }
 
+/* Raise QUIC::Error::StreamClosed if nothing more can be written to the
+   stream: it was reset or has closed, or the peer sent STOP_SENDING. */
+static void quic_stream_check_writable(quic_stream_t *s) {
+  if (s->reset || s->closed) {
+    rb_raise(rb_eQUICErrorStreamClosed, "stream is closed");
+  }
+  if (s->stopped) {
+    rb_raise(rb_eQUICErrorStreamClosed,
+             "the peer asked to stop sending (error code %llu)",
+             (unsigned long long)s->stop_app_error_code);
+  }
+}
+
 /* Append a binary copy of |data| to @pending_chunks and optionally set the
    fin_sent flag. Flow control is the caller's concern (#write blocks in
    quic_stream_write_m and #write_nonblock returns a partial byte count in
@@ -55,9 +68,7 @@ static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
 
-  if (s->reset || s->closed) {
-    rb_raise(rb_eQUICErrorStreamClosed, "stream is closed");
-  }
+  quic_stream_check_writable(s);
   if (s->fin_sent) {
     rb_raise(rb_eQUICErrorStreamClosed, "stream FIN already sent");
   }
@@ -94,7 +105,9 @@ static bool quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data) {
    per-stream and the per-connection flow control limits ngtcp2 tracks, less
    the bytes already queued in @pending_chunks but not yet handed to ngtcp2.
    ngtcp2 only counts what it has sent, so without the subtraction a run of
-   writes could queue far more than the peer allows. */
+   writes could queue far more than the peer allows. Callers check the
+   stream is writable first: a stopped stream's @pending_chunks no longer
+   matches its offsets. */
 static uint64_t quic_stream_window_left(VALUE self, VALUE client_v,
                                         quic_stream_t *s) {
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
@@ -117,8 +130,10 @@ static uint64_t quic_stream_window_left(VALUE self, VALUE client_v,
 /* Blocking write: block by repeatedly invoking #pump_once on the owning
    connection (@client) until the peer's flow control window has enough room
    for the full payload, then enqueue. IO#write-compatible: always queues all
-   of `data`. Bare Streams (built via QUIC::Stream.allocate for unit tests,
-   with @client = nil) skip the window check entirely. */
+   of `data`. A window that can no longer open, because the peer sent
+   STOP_SENDING or the stream ended meanwhile, raises
+   QUIC::Error::StreamClosed. Bare Streams (built via QUIC::Stream.allocate
+   for unit tests, with @client = nil) skip the window check entirely. */
 static VALUE quic_stream_write_m(int argc, VALUE *argv, VALUE self) {
   VALUE data;
   bool fin = quic_stream_fin_kwarg(argc, argv, &data);
@@ -139,8 +154,10 @@ static VALUE quic_stream_write_m(int argc, VALUE *argv, VALUE self) {
     /* Loop until the full payload would fit in the current window. pump_once
        raises QUIC::Error::NotBound if the connection has not been #bind'ed;
        that error surfaces verbatim. */
+    quic_stream_check_writable(s);
     while ((uint64_t)needed > quic_stream_window_left(self, client_v, s)) {
       rb_funcall(client_v, rb_intern("pump_once"), 0);
+      quic_stream_check_writable(s);
     }
   }
 
@@ -172,6 +189,8 @@ static VALUE quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self) {
 
   quic_stream_t *s;
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
+  /* Before the window: a stream that cannot be written to never gets one. */
+  quic_stream_check_writable(s);
   uint64_t avail = quic_stream_window_left(self, client_v, s);
 
   if (avail == 0) {

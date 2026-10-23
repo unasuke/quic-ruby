@@ -323,15 +323,19 @@ module QUIC
     # Server) until the peer's flow control window has room for the full
     # payload, then queues all bytes and returns data.bytesize. Requires the
     # owning connection to be bound to a socket via #bind; raises
-    # QUIC::Error::NotBound otherwise.
+    # QUIC::Error::NotBound otherwise. Raises QUIC::Error::StreamClosed,
+    # while waiting too, once the stream has been reset or closed, or the
+    # peer has sent STOP_SENDING. STOP_SENDING also drops what was queued
+    # but not yet sent.
     def write: (String data, ?fin: bool) -> Integer
 
     # Non-blocking variant. Queues as much of `data` as the current flow
     # control window allows and returns the byte count actually queued.
     # Raises QUIC::Error::WaitWritable (mixed in with IO::WaitWritable) when
-    # the window is zero and the payload is non-empty. If only a partial
-    # prefix is accepted, `fin: true` is NOT propagated; the caller must
-    # re-issue with `fin: true` on the trailing chunk.
+    # the window is zero and the payload is non-empty, and
+    # QUIC::Error::StreamClosed as #write does. If only a partial prefix is
+    # accepted, `fin: true` is NOT propagated; the caller must re-issue with
+    # `fin: true` on the trailing chunk.
     def write_nonblock: (String data, ?fin: bool) -> Integer
     def eof?: () -> bool
 

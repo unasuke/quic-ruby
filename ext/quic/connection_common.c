@@ -508,7 +508,9 @@ static VALUE quic_acked_stream_data_offset_body(VALUE arg) {
   /* Shift any head Chunks of @pending_chunks whose end-offset is fully
      covered by acked_offset. Each Chunk's start-offset in the stream is
      pending_shifted (after previous shifts); its end-offset is
-     pending_shifted + RSTRING_LEN(head). */
+     pending_shifted + RSTRING_LEN(head). A stopped stream's
+     @pending_chunks is empty, and acks for what it sent before shift
+     nothing. */
   VALUE pending = rb_ivar_get(stream, rb_intern("@pending_chunks"));
   while (RARRAY_LEN(pending) > 0) {
     VALUE head = RARRAY_AREF(pending, 0);
@@ -626,9 +628,51 @@ static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
   return quic_conn_protect(c, quic_stream_reset_body, &a);
 }
 
+/* Nothing queued on stream can go out any more: drop it all, and have
+   #write_pkt skip the stream from now on. ngtcp2 retransmits no STREAM
+   frame of a stream it has reset, so it no longer reads the bytes it was
+   given either. */
+static void quic_stream_stop(VALUE stream) {
+  quic_stream_t *s;
+  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  s->stopped = true;
+  rb_ary_clear(rb_ivar_get(stream, rb_intern("@pending_chunks")));
+}
+
+static VALUE quic_recv_stop_sending_body(VALUE arg) {
+  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
+  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
+  if (NIL_P(stream))
+    return Qnil;
+
+  quic_stream_t *s;
+  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  s->stop_app_error_code = a->app_error_code;
+  quic_stream_stop(stream);
+  return Qnil;
+}
+
+/* The peer sent STOP_SENDING. ngtcp2 shuts the send side and sends
+   RESET_STREAM itself once this returns. A stream handler learns of it when
+   #write_pkt finds the send side shut (stream_shut_write). */
+static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
+                                     uint64_t app_error_code, void *user_data,
+                                     void *stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
+  quic_conn_t *c = (quic_conn_t *)user_data;
+  if (c->handler)
+    return 0;
+  struct quic_stream_cb_args a = {
+      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
+  return quic_conn_protect(c, quic_recv_stop_sending_body, &a);
+}
+
 /* The callbacks below matter only to a stream handler. Without one, the
    QUIC::Stream mode needs none of them. */
 
+/* This endpoint stopped reading the stream, and STOP_SENDING is going out.
+   Not to be confused with recv_stop_sending above. */
 static int quic_stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                        uint64_t app_error_code, void *user_data,
                                        void *stream_user_data) {
@@ -701,6 +745,7 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
   callbacks->stream_close = quic_stream_close_cb;
   callbacks->stream_reset = quic_stream_reset_cb;
+  callbacks->recv_stop_sending = quic_recv_stop_sending_cb;
   callbacks->stream_stop_sending = quic_stream_stop_sending_cb;
   callbacks->extend_max_stream_data = quic_extend_max_stream_data_cb;
   callbacks->extend_max_remote_streams_bidi =
@@ -708,11 +753,12 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
-/* Find the first stream in @streams that has either pending bytes or a
-   pending FIN to flush. Phase 4 minimum: linear scan, take the first match
-   (no round-robin). Sets *out_datav to the byte slice to send, *out_datavcnt
-   to 0 or 1, *out_flags to NGTCP2_WRITE_STREAM_FLAG_FIN when applicable.
-   Returns the stream's Ruby VALUE (or Qnil if no candidate). */
+/* Find the first stream in @streams, stopped ones aside, that has either
+   pending bytes or a pending FIN to flush. Phase 4 minimum: linear scan,
+   take the first match (no round-robin). Sets *out_datav to the byte slice
+   to send, *out_datavcnt to 0 or 1, *out_flags to
+   NGTCP2_WRITE_STREAM_FLAG_FIN when applicable. Returns the stream's Ruby
+   VALUE (or Qnil if no candidate). */
 static VALUE quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
                                         size_t *out_datavcnt,
                                         uint32_t *out_flags,
@@ -724,7 +770,7 @@ static VALUE quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
     VALUE st = RARRAY_AREF(stream_values, i);
     quic_stream_t *s;
     TypedData_Get_Struct(st, quic_stream_t, &quic_stream_data_type, s);
-    if (s->fin_flushed)
+    if (s->fin_flushed || s->stopped)
       continue;
 
     VALUE pending = rb_ivar_get(st, rb_intern("@pending_chunks"));
@@ -794,11 +840,18 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
       c->conn, path, pi, dest, destlen, &pdatalen, writev_flags, send_stream_id,
       &datav, datavcnt, c->now);
 
-  if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED && NIL_P(c->pending_exc)) {
-    /* The stream's queued data is beyond what the peer's flow control lets
-       through right now. Keep it queued and build the packet without it, so
-       that ACKs and other frames still go out; the data follows once the
-       peer extends its window (MAX_STREAM_DATA / MAX_DATA). */
+  if ((n == NGTCP2_ERR_STREAM_DATA_BLOCKED || n == NGTCP2_ERR_STREAM_SHUT_WR) &&
+      NIL_P(c->pending_exc)) {
+    /* DATA_BLOCKED: the stream's queued data is beyond what the peer's flow
+       control lets through right now. Keep it queued; it follows once the
+       peer extends its window (MAX_STREAM_DATA / MAX_DATA).
+       SHUT_WR: ngtcp2 shut the stream's send side without recv_stop_sending
+       marking the stream, as #reset does. What is queued can never go out,
+       so drop it.
+       Either way, build the packet without the stream's data, so that ACKs
+       and other frames still go out. */
+    if (n == NGTCP2_ERR_STREAM_SHUT_WR)
+      quic_stream_stop(selected_stream);
     selected_stream = Qnil;
     datavcnt = 0;
     writev_flags = 0;

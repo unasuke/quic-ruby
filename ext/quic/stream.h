@@ -29,6 +29,12 @@ typedef struct {
   bool closed;       /* stream_close callback fired */
   uint64_t close_app_error_code;
   bool close_has_app_error_code;
+  /* The send side is shut: the peer's STOP_SENDING arrived, or ngtcp2
+     reported the send side shut while writing. @pending_chunks has been
+     emptied, so the offsets above no longer describe it, and #write_pkt
+     skips the stream. */
+  bool stopped;
+  uint64_t stop_app_error_code; /* the STOP_SENDING's, 0 if none arrived */
   /* Set once a peer-initiated stream has been pushed onto the owning
      connection's @accept_queue, so recv_stream_data does not enqueue it
      again on subsequent data arrivals. */
