@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.0.5] - 2026-10-24
 
 ### Fixed
 - When the peer sends STOP_SENDING on a stream, what was queued on it but not yet sent is dropped, and `QUIC::Stream#write` and `#write_nonblock` raise `QUIC::Error::StreamClosed` carrying the STOP_SENDING's error code, a `#write` waiting for the peer's window included. Before, every `#write_pkt` after it raised `QUIC::Error::StreamClosed` while the stream had bytes left to send, and a waiting `#write` returned only at the idle timeout. ([#21](https://github.com/unasuke/quic-ruby/pull/21))
