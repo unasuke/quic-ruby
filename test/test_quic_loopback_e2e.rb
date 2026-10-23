@@ -253,6 +253,124 @@ class TestQUICLoopbackE2E < Minitest::Test
     stop_server(server_thread)
   end
 
+  # The server stops reading a stream (STOP_SENDING) while most of what the
+  # client queued for it is still unsent: the congestion window lets out
+  # only a little before the first ACK. The client drops the rest, its
+  # writes to the stream fail from then on, and another stream of the same
+  # connection carries on.
+  def test_stop_sending_drops_what_the_client_had_not_sent
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(server_sock, creds)
+      server.run
+      stopped = server.accept_stream(timeout: 10)
+      raise "no stream accepted within 10 seconds" if stopped.nil?
+      stopped.close_read
+      echo = server.accept_stream(timeout: 10)
+      raise "no second stream accepted within 10 seconds" if echo.nil?
+      echo.write(echo.read, fin: true)
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    stream = client.open_bidi_stream
+    queued = stream.write_nonblock(Random.new(5).bytes(1024 * 1024))
+    assert_equal QUIC::TransportParams.default.initial_max_stream_data_bidi_remote, queued
+
+    error = pump_until_stream_closed(client, stream)
+    assert_equal "the peer asked to stop sending (error code 0)", error.message
+    assert_raises(QUIC::Error::StreamClosed) { stream.write("more") }
+
+    other = client.open_bidi_stream
+    other.write("still connected", fin: true)
+    assert_equal "still connected", other.read
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
+  # A blocking #write waits for the peer's window to open. STOP_SENDING
+  # means it never will, and the write gives up.
+  def test_stop_sending_ends_a_write_waiting_for_the_window
+    window = 64 * 1024
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(
+        server_sock, creds,
+        transport_params: QUIC::TransportParams.default.with(initial_max_stream_data_bidi_remote: window)
+      )
+      server.run
+      stream = server.accept_stream(timeout: 10)
+      raise "no stream accepted within 10 seconds" if stream.nil?
+      stream.close_read
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    stream = client.open_bidi_stream
+    stream.write("hello")
+    error = assert_raises(QUIC::Error::StreamClosed) { stream.write("x" * window) }
+    assert_equal "the peer asked to stop sending (error code 0)", error.message
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
+  # #reset shuts the send side of a stream whose bytes are all still
+  # queued. #write_pkt finds the send side shut, drops them, and another
+  # stream of the same connection carries on.
+  def test_reset_drops_what_the_client_had_not_sent
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(server_sock, creds)
+      server.run
+      # The reset stream never carried data, so it is never accepted.
+      echo = server.accept_stream(timeout: 10)
+      raise "no stream accepted within 10 seconds" if echo.nil?
+      echo.write(echo.read, fin: true)
+      begin
+        server.pump_until { false }
+      rescue QUIC::Error::Closed
+        # The client closed the connection.
+      end
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    stream = client.open_bidi_stream
+    stream.write_nonblock(Random.new(6).bytes(1024 * 1024))
+    stream.reset
+
+    other = client.open_bidi_stream
+    other.write("still connected", fin: true)
+    assert_equal "still connected", other.read
+    client.close
+
+    finish_server(server_thread)
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
+
   # Ruby code inside an ngtcp2 callback that raises must not unwind through
   # ngtcp2. With the client's stream registry frozen, stream_open fails when
   # the server opens a stream, and the FrozenError comes out of read_pkt.
@@ -284,6 +402,25 @@ class TestQUICLoopbackE2E < Minitest::Test
   end
 
   private
+
+  # Pump until #write_nonblock on stream stops raising WaitWritable (its
+  # window is full) and raises StreamClosed instead, for up to timeout
+  # seconds. Returns the StreamClosed.
+  def pump_until_stream_closed(client, stream, timeout: 10)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      flunk "the stream was not closed within #{timeout} seconds" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      client.pump_once(timeout: 0.1)
+      begin
+        stream.write_nonblock("x")
+      rescue QUIC::Error::WaitWritable
+        next
+      rescue QUIC::Error::StreamClosed => e
+        return e
+      end
+      flunk "the stream's window opened"
+    end
+  end
 
   # open_bidi_stream raises while the peer's stream limit is used up. Pump
   # until the peer raises it (MAX_STREAMS), for up to timeout seconds.
