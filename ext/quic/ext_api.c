@@ -15,14 +15,16 @@ static quic_ext_conn *quic_ext_conn_get(VALUE conn) {
 
 /* Hand every stream of the connection to h. Allowed once, and only before
    the connection has a QUIC::Stream: the two modes cannot share streams.
-   Every member of the ABI 1.0 handler is called, so h must be at least that
-   large. @stream_handler marks the connection for the Ruby side, which then
-   refuses #accept_stream. */
+   Every member of the ABI 1.0 handler is called, so h must hold them all
+   (handshake_completed is the last). A handler built against an older
+   quic/ext.h than this one is shorter than sizeof(quic_ext_stream_handler),
+   and is called only for the members its size covers. @stream_handler marks
+   the connection for the Ruby side, which then refuses #accept_stream. */
 static int quic_ext_set_stream_handler(quic_ext_conn *ec,
                                        const quic_ext_stream_handler *h,
                                        void *ud, VALUE owner) {
   quic_conn_t *c = quic_ext_conn_struct(ec);
-  if (h == NULL || h->size < sizeof(quic_ext_stream_handler))
+  if (h == NULL || !QUIC_EXT_HANDLER_HAS(h, handshake_completed))
     return QUIC_EXT_ERR_OTHER;
   if (c->handler != NULL)
     return QUIC_EXT_ERR_INVALID_STATE;
@@ -93,7 +95,7 @@ static int quic_ext_set_application_error(quic_ext_conn *ec,
 
 const quic_ext_api quic_ext_api_table = {
     .abi_major = QUIC_EXT_ABI_MAJOR,
-    .abi_minor = 0,
+    .abi_minor = QUIC_EXT_ABI_MINOR,
     .size = sizeof(quic_ext_api),
     .conn_get = quic_ext_conn_get,
     .set_stream_handler = quic_ext_set_stream_handler,

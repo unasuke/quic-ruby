@@ -1,3 +1,8 @@
+## [Unreleased]
+
+### Added
+- `quic/ext.h` is ABI 1.1: a stream handler's new `recv_stop_sending` is called as soon as the peer's STOP_SENDING arrives, instead of the handler learning of it when the stream closes. Handlers built for ABI 1.0 keep working. ([#23](https://github.com/unasuke/quic-ruby/pull/23))
+
 ## [0.0.5] - 2026-10-24
 
 ### Fixed

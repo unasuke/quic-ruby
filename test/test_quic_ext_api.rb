@@ -19,6 +19,9 @@ class TestQUICExtAPI < Minitest::Test
   ALPN = ["echo"].freeze
   LOCAL_SOCKADDR = Addrinfo.udp("127.0.0.1", 4433).to_sockaddr
   REMOTE_SOCKADDR = Addrinfo.udp("127.0.0.1", 50000).to_sockaddr
+  # Means nothing: neither 0 nor an HTTP/3 code, so that the handler seeing
+  # it shows the code was passed through.
+  STOP_SENDING_CODE = 0x2a
 
   def setup
     skip "test/ext/quic_ext_echo is not built" unless defined?(QUICExtEcho)
@@ -29,6 +32,11 @@ class TestQUICExtAPI < Minitest::Test
     assert QUICExtEcho.load_api(1)
     refute QUICExtEcho.load_api(0)
     refute QUICExtEcho.load_api(2)
+  end
+
+  # The table's abi_minor and the header's QUIC_EXT_ABI_MINOR move together.
+  def test_get_api_reports_the_abi_minor_it_was_built_with
+    assert_equal QUICExtEcho::BUILT_ABI_MINOR, QUICExtEcho.abi_minor
   end
 
   def test_conn_get_raises_type_error_for_other_objects
@@ -59,6 +67,21 @@ class TestQUICExtAPI < Minitest::Test
     server.instance_variable_get(:@streams)[0] = :a_stream
     error = assert_raises(RuntimeError) { QUICExtEcho::Handler.attach(server) }
     assert_equal "set_stream_handler failed: -1", error.message
+  end
+
+  # QUIC_EXT_ERR_OTHER (-99): a handler whose size ends before the last
+  # member of ABI 1.0.
+  def test_set_stream_handler_refuses_a_handler_smaller_than_abi_1_0
+    server = server_from_client_initial
+    error = assert_raises(RuntimeError) { QUICExtEcho::Handler.attach(server, :too_small) }
+    assert_equal "set_stream_handler failed: -99", error.message
+  end
+
+  # A handler built against ABI 1.0 is shorter than the handler struct is
+  # now, and still has every member ABI 1.0 calls.
+  def test_set_stream_handler_accepts_an_abi_1_0_handler
+    server = server_from_client_initial
+    assert_kind_of QUICExtEcho::Handler, QUICExtEcho::Handler.attach(server, :abi_1_0)
   end
 
   def test_local_max_streams_bidi_reports_initial_max_streams_bidi
@@ -121,7 +144,61 @@ class TestQUICExtAPI < Minitest::Test
     stop_server(server_thread)
   end
 
+  # The handler hears of the STOP_SENDING as it arrives, before the stream
+  # closes, and stops echoing, so #write_pkt never finds the send side shut.
+  # stream_close reports the STOP_SENDING's code.
+  def test_handler_learns_of_stop_sending_as_it_arrives
+    id, events = stop_sending_over_loopback(:current)
+    assert_equal [
+      [:recv_stop_sending, id, STOP_SENDING_CODE],
+      [:stream_close, id, STOP_SENDING_CODE]
+    ], events
+  end
+
+  # quic.so does not call a handler built against ABI 1.0 past its size. It
+  # learns of the STOP_SENDING only when the stream closes.
+  def test_abi_1_0_handler_is_not_told_of_stop_sending
+    id, events = stop_sending_over_loopback(:abi_1_0)
+    refute events.any? { |kind, _| kind == :recv_stop_sending }, events.inspect
+    assert_includes events, [:stream_close, id, STOP_SENDING_CODE]
+  end
+
   private
+
+  # The client writes 512 KiB, twice its stream window, and never reads, so
+  # the server's echo stops at the window and cannot finish before the
+  # client's STOP_SENDING arrives. The server's stream then closes once the
+  # client acknowledges its RESET_STREAM. Returns the stream's id and the
+  # handler's events for that stream.
+  def stop_sending_over_loopback(layout)
+    creds = loopback_credentials
+    server_sock, port = bind_server_socket
+    server_thread = start_server_thread do
+      server = accept_loopback_server(server_sock, creds)
+      handler = QUICExtEcho::Handler.attach(server, layout)
+      server.run
+      server.pump_until { handler.closed_streams >= 1 }
+      handler
+    end
+
+    client, sock = connect_loopback_client(port, creds)
+    stream = client.open_bidi_stream
+    write_in_chunks(stream, Random.new(3).bytes(512 * 1024))
+    QUICExtEcho.shutdown_stream_read(client, stream.id, STOP_SENDING_CODE)
+    # Keep acknowledging until the server has seen the stream close.
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + JOIN_TIMEOUT
+    while server_thread.alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      client.pump_once(timeout: 0.05)
+    end
+    client.close
+
+    handler = finish_server(server_thread)
+    [stream.id, handler.events.select { |_, event_id| event_id == stream.id }]
+  ensure
+    sock&.close
+    server_sock&.close
+    stop_server(server_thread)
+  end
 
   def client_initial
     QUIC::Connection::Client.new(

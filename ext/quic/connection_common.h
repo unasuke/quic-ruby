@@ -14,6 +14,14 @@
    minimum destlen ngtcp2 accepts. Revisit when PMTUD is enabled (Phase 4+). */
 #define QUIC_WRITE_PKT_BUFLEN NGTCP2_MAX_UDP_PAYLOAD_SIZE
 
+/* Whether the stream handler h has member, judged by the size it was built
+   with: a handler built against an older quic/ext.h is shorter, and its
+   memory ends before the members added since. Compared with the end of the
+   member, not the start of the next one, so trailing padding does not
+   count. */
+#define QUIC_EXT_HANDLER_HAS(h, member)                                        \
+  ((h)->size >= offsetof(quic_ext_stream_handler, member) + sizeof((h)->member))
+
 /* A QUIC::Endpoint (endpoint.c). */
 typedef struct quic_endpoint quic_endpoint_t;
 

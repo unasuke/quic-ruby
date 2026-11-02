@@ -147,7 +147,7 @@ It applies to clients, `Connection::Server.accept` and every connection of an En
 
 ### From other native extensions
 
-Another native extension can drive a connection's streams from C instead of through `QUIC::Stream`, as the [http3](https://github.com/unasuke/http3-ruby) gem does. `quic/ext.h` declares the function table (ABI 1.0), and `QUIC::EXT_INCLUDE_DIR` tells an `extconf.rb` where it is:
+Another native extension can drive a connection's streams from C instead of through `QUIC::Stream`, as the [http3](https://github.com/unasuke/http3-ruby) gem does. `quic/ext.h` declares the function table (ABI 1.1; a stream handler built against ABI 1.0 keeps working), and `QUIC::EXT_INCLUDE_DIR` tells an `extconf.rb` where it is:
 
 ```ruby
 require "mkmf"
