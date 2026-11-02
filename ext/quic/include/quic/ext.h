@@ -18,6 +18,9 @@
  *   set_stream_handler takes any handler at least as large as the ABI 1.0
  *   one, and quic.so calls a member added later only when the handler's
  *   `size` covers it. Every member `size` covers must be non-NULL.
+ *   A member added after ABI 1.0 is marked with the minor that brought it
+ *   (abi_minor N), and quic.so calls a handler member only when the table's
+ *   abi_minor is at least that N: an older quic.so leaves it uncalled.
  * - Exceptions: no function in the table and no handler function raises a
  *   Ruby exception; they return 0 or a negative error code. The one
  *   exception is conn_get, which raises TypeError for a wrong object and is
@@ -40,6 +43,8 @@
 #include <stdint.h>
 
 #define QUIC_EXT_ABI_MAJOR 1
+/* The abi_minor of the structs as this header declares them. */
+#define QUIC_EXT_ABI_MINOR 1
 
 #define QUIC_EXT_ERR_INVALID_STATE (-1)
 #define QUIC_EXT_ERR_STREAM_ID_BLOCKED (-2)
@@ -70,6 +75,19 @@ typedef struct {
   int (*stream_close)(void *ud, int64_t id, int has_code,
                       uint64_t app_error_code);
   int (*handshake_completed)(void *ud);
+  /* abi_minor 1 */
+  /* The peer sent STOP_SENDING on stream id, which this endpoint sends on
+     (stream_stop_sending is the other way: this endpoint stopped reading).
+     Called once per stream. Once it returns 0, ngtcp2 shuts the send side
+     and sends RESET_STREAM carrying app_error_code, unless all that was
+     sent, FIN included, has been acknowledged. next_stream_data should no
+     longer offer the stream; if it does, stream_shut_write follows. It can
+     come before any recv_stream_data, for a stream the peer has just
+     opened, and also comes for a unidirectional stream this endpoint
+     opened. stream_close may follow within the same #read_pkt. Calling
+     shutdown_stream_write here sends RESET_STREAM with that code instead,
+     but stream_close still reports app_error_code. */
+  int (*recv_stop_sending)(void *ud, int64_t id, uint64_t app_error_code);
 } quic_ext_stream_handler;
 
 typedef struct {

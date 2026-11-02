@@ -653,16 +653,24 @@ static VALUE quic_recv_stop_sending_body(VALUE arg) {
 }
 
 /* The peer sent STOP_SENDING. ngtcp2 shuts the send side and sends
-   RESET_STREAM itself once this returns. A stream handler learns of it when
-   #write_pkt finds the send side shut (stream_shut_write). */
+   RESET_STREAM itself once this returns. A stream handler hears of it here
+   (recv_stop_sending). One built against ABI 1.0 lacks that member, and
+   learns of it only when #write_pkt finds the send side shut
+   (stream_shut_write) or the stream closes. */
 static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                      uint64_t app_error_code, void *user_data,
                                      void *stream_user_data) {
   (void)conn;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler)
-    return 0;
+  if (c->handler) {
+    if (!QUIC_EXT_HANDLER_HAS(c->handler, recv_stop_sending))
+      return 0;
+    return c->handler->recv_stop_sending(c->handler_ud, stream_id,
+                                         app_error_code) < 0
+               ? NGTCP2_ERR_CALLBACK_FAILURE
+               : 0;
+  }
   struct quic_stream_cb_args a = {
       .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
   return quic_conn_protect(c, quic_recv_stop_sending_body, &a);

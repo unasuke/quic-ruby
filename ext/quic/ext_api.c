@@ -95,7 +95,7 @@ static int quic_ext_set_application_error(quic_ext_conn *ec,
 
 const quic_ext_api quic_ext_api_table = {
     .abi_major = QUIC_EXT_ABI_MAJOR,
-    .abi_minor = 0,
+    .abi_minor = QUIC_EXT_ABI_MINOR,
     .size = sizeof(quic_ext_api),
     .conn_get = quic_ext_conn_get,
     .set_stream_handler = quic_ext_set_stream_handler,

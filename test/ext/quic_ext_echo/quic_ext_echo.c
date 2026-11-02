@@ -41,6 +41,20 @@ typedef struct echo_stream {
   struct echo_stream *next;
 } echo_stream;
 
+/* What Handler#events reports, in the order the handler was called. */
+typedef enum {
+  ECHO_RECV_STOP_SENDING,
+  ECHO_STREAM_SHUT_WRITE,
+  ECHO_STREAM_CLOSE,
+} echo_event_kind;
+
+typedef struct {
+  echo_event_kind kind;
+  int64_t id;
+  bool has_code;
+  uint64_t code;
+} echo_event;
+
 typedef struct {
   VALUE conn;
   quic_ext_conn *qc;
@@ -48,7 +62,26 @@ typedef struct {
   long handshakes;
   long closed_streams;
   uint64_t max_remote_streams_bidi;
+  echo_event *events;
+  size_t nevents;
+  size_t events_cap;
 } echo_handler;
+
+/* Append an event. Returns -1 when out of memory, for the handler function
+   to return. */
+static int echo_record(echo_handler *h, echo_event_kind kind, int64_t id,
+                       bool has_code, uint64_t code) {
+  if (h->nevents == h->events_cap) {
+    size_t cap = h->events_cap ? h->events_cap * 2 : 8;
+    echo_event *events = realloc(h->events, cap * sizeof(*events));
+    if (events == NULL)
+      return -1;
+    h->events = events;
+    h->events_cap = cap;
+  }
+  h->events[h->nevents++] = (echo_event){kind, id, has_code, code};
+  return 0;
+}
 
 static void echo_stream_free(echo_stream *s) {
   for (size_t i = 0; i < s->nchunks; i++)
@@ -160,7 +193,7 @@ static int echo_stream_shut_write(void *ud, int64_t id) {
   echo_stream *s = echo_find_stream(ud, id, false);
   if (s != NULL)
     s->shut = true;
-  return 0;
+  return echo_record(ud, ECHO_STREAM_SHUT_WRITE, id, false, 0);
 }
 
 static int echo_acked_stream_data(void *ud, int64_t id, uint64_t n) {
@@ -213,8 +246,6 @@ static int echo_stream_reset(void *ud, int64_t id, uint64_t final_size,
 
 static int echo_stream_close(void *ud, int64_t id, int has_code,
                              uint64_t app_error_code) {
-  (void)has_code;
-  (void)app_error_code;
   echo_handler *h = ud;
   for (echo_stream **p = &h->streams; *p != NULL; p = &(*p)->next) {
     if ((*p)->id == id) {
@@ -225,13 +256,25 @@ static int echo_stream_close(void *ud, int64_t id, int has_code,
     }
   }
   h->closed_streams++;
-  return 0;
+  return echo_record(h, ECHO_STREAM_CLOSE, id, has_code != 0, app_error_code);
 }
 
 static int echo_handshake_completed(void *ud) {
   echo_handler *h = ud;
   h->handshakes++;
   return 0;
+}
+
+/* The peer asked us to stop sending: echo no more. STOP_SENDING can be the
+   first frame of a stream the peer opens, and no stream_open reaches a
+   handler, so the stream may be new here. */
+static int echo_recv_stop_sending(void *ud, int64_t id,
+                                  uint64_t app_error_code) {
+  echo_stream *s = echo_find_stream(ud, id, true);
+  if (s == NULL)
+    return -1;
+  s->shut = true;
+  return echo_record(ud, ECHO_RECV_STOP_SENDING, id, true, app_error_code);
 }
 
 #define ECHO_HANDLER_MEMBERS                                                   \
@@ -245,11 +288,20 @@ static int echo_handshake_completed(void *ud) {
   .extend_max_remote_streams_bidi = echo_extend_max_remote_streams_bidi,       \
   .stream_stop_sending = echo_stream_stop_sending,                             \
   .stream_reset = echo_stream_reset, .stream_close = echo_stream_close,        \
-  .handshake_completed = echo_handshake_completed
+  .handshake_completed = echo_handshake_completed,                             \
+  .recv_stop_sending = echo_recv_stop_sending
 
 /* Handler.attach picks one of these by its layout argument. */
 static const quic_ext_stream_handler echo_stream_handler = {
     .size = sizeof(quic_ext_stream_handler),
+    ECHO_HANDLER_MEMBERS,
+};
+
+/* A handler as built against ABI 1.0: its size ends before
+   recv_stop_sending. The member is filled in all the same, so that a
+   quic.so calling it regardless of the size shows in Handler#events. */
+static const quic_ext_stream_handler echo_stream_handler_1_0 = {
+    .size = offsetof(quic_ext_stream_handler, recv_stop_sending),
     ECHO_HANDLER_MEMBERS,
 };
 
@@ -276,6 +328,7 @@ static void echo_handler_free(void *ptr) {
     h->streams = s->next;
     echo_stream_free(s);
   }
+  free(h->events);
   xfree(h);
 }
 
@@ -306,6 +359,8 @@ static echo_handler *echo_handler_get(VALUE self) {
 static const quic_ext_stream_handler *echo_handler_layout(VALUE layout) {
   if (layout == ID2SYM(rb_intern("current")))
     return &echo_stream_handler;
+  if (layout == ID2SYM(rb_intern("abi_1_0")))
+    return &echo_stream_handler_1_0;
   if (layout == ID2SYM(rb_intern("too_small")))
     return &echo_stream_handler_too_small;
   rb_raise(rb_eArgError, "unknown layout: %" PRIsVALUE, layout);
@@ -313,8 +368,9 @@ static const quic_ext_stream_handler *echo_handler_layout(VALUE layout) {
 
 /* Handler.attach(conn, layout = :current): register an echo handler on
    conn. layout picks the handler struct: :current is this quic/ext.h's,
-   :too_small one too short for ABI 1.0. Raises RuntimeError carrying the
-   QUIC_EXT_ERR_* code when quic.so refuses. */
+   :abi_1_0 one built against ABI 1.0, :too_small one too short for ABI
+   1.0. Raises RuntimeError carrying the QUIC_EXT_ERR_* code when quic.so
+   refuses. */
 static VALUE echo_handler_s_attach(int argc, VALUE *argv, VALUE klass) {
   VALUE conn, layout;
   rb_scan_args(argc, argv, "11", &conn, &layout);
@@ -348,11 +404,62 @@ static VALUE echo_handler_local_max_streams_bidi(VALUE self) {
   return ULL2NUM(api->local_max_streams_bidi(echo_handler_get(self)->qc));
 }
 
+/* Handler#events: what recv_stop_sending, stream_shut_write and
+   stream_close were called with, in order, as
+   [:recv_stop_sending, id, code], [:stream_shut_write, id] and
+   [:stream_close, id, code], the last code nil when ngtcp2 gave none. */
+static VALUE echo_handler_events(VALUE self) {
+  echo_handler *h = echo_handler_get(self);
+  VALUE ary = rb_ary_new_capa((long)h->nevents);
+  for (size_t i = 0; i < h->nevents; i++) {
+    const echo_event *e = &h->events[i];
+    VALUE code = e->has_code ? ULL2NUM(e->code) : Qnil;
+    VALUE id = LL2NUM(e->id);
+    switch (e->kind) {
+    case ECHO_RECV_STOP_SENDING:
+      rb_ary_push(
+          ary, rb_ary_new_from_args(3, ID2SYM(rb_intern("recv_stop_sending")),
+                                    id, code));
+      break;
+    case ECHO_STREAM_SHUT_WRITE:
+      rb_ary_push(ary, rb_ary_new_from_args(
+                           2, ID2SYM(rb_intern("stream_shut_write")), id));
+      break;
+    case ECHO_STREAM_CLOSE:
+      rb_ary_push(ary, rb_ary_new_from_args(
+                           3, ID2SYM(rb_intern("stream_close")), id, code));
+      break;
+    }
+  }
+  return ary;
+}
+
 /* QUICExtEcho.load_api(major): whether quic_ext_get_api hands out a table
    for that major version. */
 static VALUE echo_s_load_api(VALUE mod, VALUE major) {
   (void)mod;
   return get_api(NUM2UINT(major)) != NULL ? Qtrue : Qfalse;
+}
+
+/* QUICExtEcho.abi_minor: the abi_minor of the table quic.so hands out. */
+static VALUE echo_s_abi_minor(VALUE mod) {
+  (void)mod;
+  return UINT2NUM(api->abi_minor);
+}
+
+/* QUICExtEcho.shutdown_stream_read(conn, id, code): stop reading stream id
+   of conn, sending STOP_SENDING with code. Any connection will do, one in
+   the QUIC::Stream mode too: QUIC::Stream#close_read makes the same ngtcp2
+   call, but always with code 0. Raises RuntimeError carrying the
+   QUIC_EXT_ERR_* code when the table function fails. */
+static VALUE echo_s_shutdown_stream_read(VALUE mod, VALUE conn, VALUE id,
+                                         VALUE code) {
+  (void)mod;
+  quic_ext_conn *qc = api->conn_get(conn);
+  int rv = api->shutdown_stream_read(qc, NUM2LL(id), NUM2ULL(code));
+  if (rv != 0)
+    rb_raise(rb_eRuntimeError, "shutdown_stream_read failed: %d", rv);
+  return Qnil;
 }
 
 #endif /* HAVE_RB_EXT_RESOLVE_SYMBOL */
@@ -371,7 +478,12 @@ RUBY_FUNC_EXPORTED void Init_quic_ext_echo(void) {
              QUIC_EXT_ABI_MAJOR);
 
   rb_define_const(mod, "AVAILABLE", Qtrue);
+  /* The QUIC_EXT_ABI_MINOR of the quic/ext.h this was built against. */
+  rb_define_const(mod, "BUILT_ABI_MINOR", INT2NUM(QUIC_EXT_ABI_MINOR));
   rb_define_singleton_method(mod, "load_api", echo_s_load_api, 1);
+  rb_define_singleton_method(mod, "abi_minor", echo_s_abi_minor, 0);
+  rb_define_singleton_method(mod, "shutdown_stream_read",
+                             echo_s_shutdown_stream_read, 3);
   VALUE handler = rb_define_class_under(mod, "Handler", rb_cObject);
   rb_undef_alloc_func(handler);
   rb_define_singleton_method(handler, "attach", echo_handler_s_attach, -1);
@@ -381,6 +493,7 @@ RUBY_FUNC_EXPORTED void Init_quic_ext_echo(void) {
                    echo_handler_max_remote_streams_bidi, 0);
   rb_define_method(handler, "local_max_streams_bidi",
                    echo_handler_local_max_streams_bidi, 0);
+  rb_define_method(handler, "events", echo_handler_events, 0);
 #else
   rb_define_const(mod, "AVAILABLE", Qfalse);
 #endif
