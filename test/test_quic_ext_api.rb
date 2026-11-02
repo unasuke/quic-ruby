@@ -61,6 +61,14 @@ class TestQUICExtAPI < Minitest::Test
     assert_equal "set_stream_handler failed: -1", error.message
   end
 
+  # QUIC_EXT_ERR_OTHER (-99): a handler whose size ends before the last
+  # member of ABI 1.0.
+  def test_set_stream_handler_refuses_a_handler_smaller_than_abi_1_0
+    server = server_from_client_initial
+    error = assert_raises(RuntimeError) { QUICExtEcho::Handler.attach(server, :too_small) }
+    assert_equal "set_stream_handler failed: -99", error.message
+  end
+
   def test_local_max_streams_bidi_reports_initial_max_streams_bidi
     server = server_from_client_initial(
       transport_params: QUIC::TransportParams.default.with(initial_max_streams_bidi: 7)

@@ -14,7 +14,10 @@
  *   the table's. The structs below grow only by appending, which bumps
  *   abi_minor; reordering, removing or retyping a member bumps abi_major.
  *   Check `size` before calling a member added after the version you were
- *   built against. The handler struct follows the same rules.
+ *   built against. The handler struct follows the same rules:
+ *   set_stream_handler takes any handler at least as large as the ABI 1.0
+ *   one, and quic.so calls a member added later only when the handler's
+ *   `size` covers it. Every member `size` covers must be non-NULL.
  * - Exceptions: no function in the table and no handler function raises a
  *   Ruby exception; they return 0 or a negative error code. The one
  *   exception is conn_get, which raises TypeError for a wrong object and is

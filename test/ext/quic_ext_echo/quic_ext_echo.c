@@ -234,20 +234,30 @@ static int echo_handshake_completed(void *ud) {
   return 0;
 }
 
+#define ECHO_HANDLER_MEMBERS                                                   \
+  .recv_stream_data = echo_recv_stream_data,                                   \
+  .next_stream_data = echo_next_stream_data,                                   \
+  .stream_data_written = echo_stream_data_written,                             \
+  .stream_blocked = echo_stream_blocked,                                       \
+  .stream_shut_write = echo_stream_shut_write,                                 \
+  .acked_stream_data = echo_acked_stream_data,                                 \
+  .extend_max_stream_data = echo_extend_max_stream_data,                       \
+  .extend_max_remote_streams_bidi = echo_extend_max_remote_streams_bidi,       \
+  .stream_stop_sending = echo_stream_stop_sending,                             \
+  .stream_reset = echo_stream_reset, .stream_close = echo_stream_close,        \
+  .handshake_completed = echo_handshake_completed
+
+/* Handler.attach picks one of these by its layout argument. */
 static const quic_ext_stream_handler echo_stream_handler = {
     .size = sizeof(quic_ext_stream_handler),
-    .recv_stream_data = echo_recv_stream_data,
-    .next_stream_data = echo_next_stream_data,
-    .stream_data_written = echo_stream_data_written,
-    .stream_blocked = echo_stream_blocked,
-    .stream_shut_write = echo_stream_shut_write,
-    .acked_stream_data = echo_acked_stream_data,
-    .extend_max_stream_data = echo_extend_max_stream_data,
-    .extend_max_remote_streams_bidi = echo_extend_max_remote_streams_bidi,
-    .stream_stop_sending = echo_stream_stop_sending,
-    .stream_reset = echo_stream_reset,
-    .stream_close = echo_stream_close,
-    .handshake_completed = echo_handshake_completed,
+    ECHO_HANDLER_MEMBERS,
+};
+
+/* Claims a size that ends before handshake_completed, the last member of
+   ABI 1.0, so that set_stream_handler refuses it. */
+static const quic_ext_stream_handler echo_stream_handler_too_small = {
+    .size = offsetof(quic_ext_stream_handler, handshake_completed),
+    ECHO_HANDLER_MEMBERS,
 };
 
 /* QUICExtEcho::Handler. The connection marks this object as the handler's
@@ -293,16 +303,30 @@ static echo_handler *echo_handler_get(VALUE self) {
   return h;
 }
 
-/* Handler.attach(conn): register an echo handler on conn. Raises
-   RuntimeError carrying the QUIC_EXT_ERR_* code when quic.so refuses. */
-static VALUE echo_handler_s_attach(VALUE klass, VALUE conn) {
+static const quic_ext_stream_handler *echo_handler_layout(VALUE layout) {
+  if (layout == ID2SYM(rb_intern("current")))
+    return &echo_stream_handler;
+  if (layout == ID2SYM(rb_intern("too_small")))
+    return &echo_stream_handler_too_small;
+  rb_raise(rb_eArgError, "unknown layout: %" PRIsVALUE, layout);
+}
+
+/* Handler.attach(conn, layout = :current): register an echo handler on
+   conn. layout picks the handler struct: :current is this quic/ext.h's,
+   :too_small one too short for ABI 1.0. Raises RuntimeError carrying the
+   QUIC_EXT_ERR_* code when quic.so refuses. */
+static VALUE echo_handler_s_attach(int argc, VALUE *argv, VALUE klass) {
+  VALUE conn, layout;
+  rb_scan_args(argc, argv, "11", &conn, &layout);
+  const quic_ext_stream_handler *vt = echo_handler_layout(
+      NIL_P(layout) ? ID2SYM(rb_intern("current")) : layout);
   quic_ext_conn *qc = api->conn_get(conn);
   echo_handler *h;
   VALUE self =
       TypedData_Make_Struct(klass, echo_handler, &echo_handler_type, h);
   h->conn = conn;
   h->qc = qc;
-  int rv = api->set_stream_handler(qc, &echo_stream_handler, h, self);
+  int rv = api->set_stream_handler(qc, vt, h, self);
   if (rv != 0)
     rb_raise(rb_eRuntimeError, "set_stream_handler failed: %d", rv);
   return self;
@@ -350,7 +374,7 @@ RUBY_FUNC_EXPORTED void Init_quic_ext_echo(void) {
   rb_define_singleton_method(mod, "load_api", echo_s_load_api, 1);
   VALUE handler = rb_define_class_under(mod, "Handler", rb_cObject);
   rb_undef_alloc_func(handler);
-  rb_define_singleton_method(handler, "attach", echo_handler_s_attach, 1);
+  rb_define_singleton_method(handler, "attach", echo_handler_s_attach, -1);
   rb_define_method(handler, "handshakes", echo_handler_handshakes, 0);
   rb_define_method(handler, "closed_streams", echo_handler_closed_streams, 0);
   rb_define_method(handler, "max_remote_streams_bidi",
