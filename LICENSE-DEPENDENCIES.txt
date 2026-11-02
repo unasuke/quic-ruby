@@ -9,7 +9,7 @@ bundled nor redistributed. The quic gem itself is MIT licensed; see
 LICENSE.txt.
 
 
-ngtcp2 1.25.0 -- https://github.com/ngtcp2/ngtcp2
+ngtcp2 1.26.0 -- https://github.com/ngtcp2/ngtcp2
 -------------------------------------------------
 
 The MIT License
@@ -53,7 +53,7 @@ the statically linked libngtcp2 and are covered by their own terms:
     COPYING text above.
 
 
-picotls f07f1c8 -- https://github.com/h2o/picotls
+picotls a2d95de -- https://github.com/h2o/picotls
 -------------------------------------------------
 
 picotls has no top-level license file; the terms are stated in the header of

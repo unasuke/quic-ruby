@@ -5,11 +5,11 @@ require "mini_portile2"
 require "shellwords"
 require "fileutils"
 
-NGTCP2_VERSION = "1.25.0"
-NGTCP2_SHA256 = "1c0843076528a87b65e9a9d455100941f4cb65d44f96c5da6ae56df146043955"
-# The picotls revision that ngtcp2 1.25.0 is tested against (see ngtcp2's README).
-PICOTLS_COMMIT = "f07f1c8c68b237f1468bc1f1fe1b68aba3ff23b4"
-PICOTLS_SHA256 = "6ecb4f8d9946c2b9342300b29627dc34e746a551d438d35af325a4495d62a6e3"
+NGTCP2_VERSION = "1.26.0"
+NGTCP2_SHA256 = "85174d674e7f8fd911a827c6e483fd417b21b1f54d7853dac464cee446c8d35f"
+# The picotls revision that ngtcp2 1.26.0 is tested against (see ngtcp2's README).
+PICOTLS_COMMIT = "a2d95de4c875d6dcb27658e476e3b624f4381bf0"
+PICOTLS_SHA256 = "d54263601c4652ef28451533bb2e2fae3f5f44aff54338cf5110b9c12c4bab3a"
 # Bump when ext/quic/patches/picotls/ or PicotlsRecipe::SOURCES changes;
 # installed? only checks for the archive.
 PICOTLS_PATCH_LEVEL = "p2"
