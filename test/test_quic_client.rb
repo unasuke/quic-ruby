@@ -49,6 +49,19 @@ class TestQUICClient < Minitest::Test
     assert_nil client.write_pkt, "expected nil once the Initial flight is drained"
   end
 
+  # #write_pkt picks a stream to send from @streams without raising: it
+  # skips a value that is not a QUIC::Stream, and an @streams that is not a
+  # Hash holds no stream at all.
+  def test_write_pkt_skips_what_is_not_a_stream_in_streams
+    client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
+    client.instance_variable_get(:@streams)[0] = :not_a_stream
+    assert_equal 0xc0, client.write_pkt.unpack1("C") & 0xc0
+
+    client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
+    client.instance_variable_set(:@streams, nil)
+    assert_equal 0xc0, client.write_pkt.unpack1("C") & 0xc0
+  end
+
   def test_write_pkt_reuses_provided_binary_buffer
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
     buf = String.new(capacity: 1200, encoding: Encoding::BINARY)

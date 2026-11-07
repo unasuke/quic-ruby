@@ -715,25 +715,49 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
+struct quic_pick_send_args {
+  quic_stream_t *picked;
+  ngtcp2_vec *datav;
+  size_t *datavcnt;
+  uint32_t *flags;
+};
+
+static int quic_conn_pick_send_stream_i(VALUE key, VALUE value, VALUE arg) {
+  (void)key;
+  struct quic_pick_send_args *a = (struct quic_pick_send_args *)arg;
+  if (!rb_typeddata_is_kind_of(value, &quic_stream_data_type))
+    return ST_CONTINUE;
+  quic_stream_t *s = (quic_stream_t *)RTYPEDDATA_DATA(value);
+  if (!quic_stream_next_send(s, a->datav, a->datavcnt, a->flags))
+    return ST_CONTINUE;
+  a->picked = s;
+  return ST_STOP;
+}
+
 /* Find the first stream in @streams that has either pending bytes or a
    pending FIN to flush (linear scan, first match, no round-robin), and
    what it has to send (quic_stream_next_send). Returns NULL if no stream
-   has anything. */
+   has anything. Raises nothing, so that #write_pkt fails only for what
+   ngtcp2 reports: a value that is not a QUIC::Stream is skipped, and an
+   @streams that is not a Hash holds no stream (only a test puts either
+   there). rb_hash_foreach raises only when the Hash changes while it
+   iterates, which the callback never does. */
 static quic_stream_t *quic_conn_pick_send_stream(VALUE self,
                                                  ngtcp2_vec *out_datav,
                                                  size_t *out_datavcnt,
                                                  uint32_t *out_flags) {
   VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  VALUE stream_values = rb_funcall(streams, rb_intern("values"), 0);
+  if (!RB_TYPE_P(streams, T_HASH))
+    return NULL;
 
-  for (long i = 0; i < RARRAY_LEN(stream_values); i++) {
-    VALUE st = RARRAY_AREF(stream_values, i);
-    quic_stream_t *s;
-    TypedData_Get_Struct(st, quic_stream_t, &quic_stream_data_type, s);
-    if (quic_stream_next_send(s, out_datav, out_datavcnt, out_flags))
-      return s;
-  }
-  return NULL;
+  struct quic_pick_send_args a = {
+      .picked = NULL,
+      .datav = out_datav,
+      .datavcnt = out_datavcnt,
+      .flags = out_flags,
+  };
+  rb_hash_foreach(streams, quic_conn_pick_send_stream_i, (VALUE)&a);
+  return a.picked;
 }
 
 /* #write_pkt for the QUIC::Stream mode. If any stream has pending bytes or
