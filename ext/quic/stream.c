@@ -5,11 +5,29 @@
 
 VALUE rb_cQUICStream;
 
-static void quic_stream_free(void *ptr) { xfree(ptr); }
+void quic_stream_free_send_buffer(quic_stream_t *s) {
+  quic_send_chunk *chunk = s->send_head;
+  while (chunk != NULL) {
+    quic_send_chunk *next = chunk->next;
+    xfree(chunk);
+    chunk = next;
+  }
+  s->send_head = NULL;
+  s->send_tail = NULL;
+  s->send_next = NULL;
+  s->send_next_off = 0;
+  s->buffered = 0;
+}
+
+/* Touches neither the connection nor any Ruby object: the connection may
+   have been freed first, in the same GC. */
+static void quic_stream_free(void *ptr) {
+  quic_stream_free_send_buffer((quic_stream_t *)ptr);
+  xfree(ptr);
+}
 
 static size_t quic_stream_size(const void *ptr) {
-  (void)ptr;
-  return sizeof(quic_stream_t);
+  return sizeof(quic_stream_t) + ((const quic_stream_t *)ptr)->buffered;
 }
 
 const rb_data_type_t quic_stream_data_type = {
@@ -39,7 +57,6 @@ quic_stream_new(int64_t stream_id, VALUE owner) {
 
   rb_ivar_set(self, rb_intern("@id"), LL2NUM(stream_id));
   rb_ivar_set(self, rb_intern("@client"), owner);
-  rb_ivar_set(self, rb_intern("@pending_chunks"), rb_ary_new());
   /* recv_buffer is a binary String; rb_str_buf_new returns ASCII-8BIT. */
   rb_ivar_set(self, rb_intern("@recv_buffer"), rb_str_buf_new(0));
   return self;
@@ -58,11 +75,11 @@ static void quic_stream_check_writable(quic_stream_t *s) {
   }
 }
 
-/* Append a binary copy of |data| to @pending_chunks and optionally set the
-   fin_sent flag. Flow control is the caller's concern (#write blocks in
-   quic_stream_write_m and #write_nonblock returns a partial byte count in
-   quic_stream_write_nonblock_m). This helper is reached only after the
-   caller has confirmed the bytes fit in the current send window, so it
+/* Append a copy of |data| to the send buffer as one chunk, and optionally
+   set the fin_sent flag. Flow control is the caller's concern (#write
+   blocks in quic_stream_write_m and #write_nonblock returns a partial byte
+   count in quic_stream_write_nonblock_m). This helper is reached only after
+   the caller has confirmed the bytes fit in the current send window, so it
    never raises QUIC::Error::WaitWritable on its own. */
 static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
   quic_stream_t *s;
@@ -77,12 +94,25 @@ static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
   long len = RSTRING_LEN(data);
 
   if (len > 0) {
-    VALUE chunk = rb_str_new(RSTRING_PTR(data), len);
-    /* rb_str_new returns ASCII-8BIT, so no encoding adjustment is needed.
-       Force it explicitly to be defensive against future CRuby changes. */
-    rb_enc_associate_index(chunk, rb_ascii8bit_encindex());
-    VALUE pending = rb_ivar_get(self, rb_intern("@pending_chunks"));
-    rb_ary_push(pending, chunk);
+    /* len is a long, so the header cannot overflow size_t. */
+    size_t size = offsetof(quic_send_chunk, data) + (size_t)len;
+    quic_send_chunk *chunk = (quic_send_chunk *)xmalloc(size);
+    chunk->next = NULL;
+    chunk->len = (size_t)len;
+    memcpy(chunk->data, RSTRING_PTR(data), (size_t)len);
+    if (s->send_tail != NULL) {
+      s->send_tail->next = chunk;
+    } else {
+      s->send_head = chunk;
+      s->head_offset = s->queued_offset;
+    }
+    s->send_tail = chunk;
+    if (s->send_next == NULL) {
+      s->send_next = chunk;
+      s->send_next_off = 0;
+    }
+    s->queued_offset += (uint64_t)len;
+    s->buffered += size;
   }
 
   if (fin) {
@@ -103,28 +133,85 @@ static bool quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data) {
 
 /* Return the effective send window for this stream: the smaller of the
    per-stream and the per-connection flow control limits ngtcp2 tracks, less
-   the bytes already queued in @pending_chunks but not yet handed to ngtcp2.
-   ngtcp2 only counts what it has sent, so without the subtraction a run of
-   writes could queue far more than the peer allows. Callers check the
-   stream is writable first: a stopped stream's @pending_chunks no longer
-   matches its offsets. */
-static uint64_t quic_stream_window_left(VALUE self, VALUE client_v,
-                                        quic_stream_t *s) {
+   the bytes already queued but not yet handed to ngtcp2. ngtcp2 only counts
+   what it has sent, so without the subtraction a run of writes could queue
+   far more than the peer allows. Callers check the stream is writable
+   first. */
+static uint64_t quic_stream_window_left(VALUE client_v, quic_stream_t *s) {
   ngtcp2_conn *conn = quic_conn_ptr(client_v);
   uint64_t stream_left =
       ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
   uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
   uint64_t left = stream_left < conn_left ? stream_left : conn_left;
 
-  /* @pending_chunks starts at stream offset pending_shifted, and the bytes
-     up to sent_offset have been sent. */
-  VALUE pending = rb_ivar_get(self, rb_intern("@pending_chunks"));
-  uint64_t queued_end = s->pending_shifted;
-  for (long i = 0; i < RARRAY_LEN(pending); i++) {
-    queued_end += (uint64_t)RSTRING_LEN(RARRAY_AREF(pending, i));
-  }
-  uint64_t unsent = queued_end - s->sent_offset;
+  uint64_t unsent = s->queued_offset - s->sent_offset;
   return left > unsent ? left - unsent : 0;
+}
+
+bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
+                           size_t *datavcnt, uint32_t *flags) {
+  if (s->stopped || s->fin_flushed)
+    return false;
+
+  if (s->send_next != NULL) {
+    datav->base = s->send_next->data + s->send_next_off;
+    datav->len = s->send_next->len - s->send_next_off;
+    *datavcnt = 1;
+    /* FIN goes with the last chunk only if ngtcp2 frames all of it; when
+       it encodes less, FIN is not flushed and the next call retries. */
+    *flags = (s->fin_sent && s->send_next == s->send_tail)
+                 ? NGTCP2_WRITE_STREAM_FLAG_FIN
+                 : 0;
+    return true;
+  }
+
+  if (s->fin_sent) {
+    /* No data to send but a pending FIN-only frame. */
+    datav->base = NULL;
+    datav->len = 0;
+    *datavcnt = 0;
+    *flags = NGTCP2_WRITE_STREAM_FLAG_FIN;
+    return true;
+  }
+  return false;
+}
+
+void quic_stream_sent(quic_stream_t *s, size_t datalen, uint32_t flags,
+                      ngtcp2_ssize pdatalen, ngtcp2_ssize n) {
+  if (pdatalen > 0) {
+    s->sent_offset += (uint64_t)pdatalen;
+    s->send_next_off += (size_t)pdatalen;
+    /* Leave send_next on no fully handed over chunk: an acknowledgement
+       of all that was sent would free it under us. */
+    if (s->send_next_off == s->send_next->len) {
+      s->send_next = s->send_next->next;
+      s->send_next_off = 0;
+    }
+    /* FIN is only actually written when all requested data fits in the
+       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
+    if ((flags & NGTCP2_WRITE_STREAM_FLAG_FIN) && (size_t)pdatalen == datalen)
+      s->fin_flushed = true;
+  } else if (datalen == 0 && n > 0 && (flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
+    /* FIN-only packet (no data) was successfully written. */
+    s->fin_flushed = true;
+  }
+}
+
+void quic_stream_release_acked(quic_stream_t *s, uint64_t offset,
+                               uint64_t datalen) {
+  /* ngtcp2 reports the acknowledged ranges of a stream in order and
+     without overlap; datalen is 0 only for a FIN alone. */
+  s->acked_offset = offset + datalen;
+  while (s->send_head != NULL &&
+         s->head_offset + s->send_head->len <= s->acked_offset) {
+    quic_send_chunk *chunk = s->send_head;
+    s->head_offset += chunk->len;
+    s->send_head = chunk->next;
+    if (s->send_head == NULL)
+      s->send_tail = NULL;
+    s->buffered -= offsetof(quic_send_chunk, data) + chunk->len;
+    xfree(chunk);
+  }
 }
 
 /* Blocking write: block by repeatedly invoking #pump_once on the owning
@@ -155,7 +242,7 @@ static VALUE quic_stream_write_m(int argc, VALUE *argv, VALUE self) {
        raises QUIC::Error::NotBound if the connection has not been #bind'ed;
        that error surfaces verbatim. */
     quic_stream_check_writable(s);
-    while ((uint64_t)needed > quic_stream_window_left(self, client_v, s)) {
+    while ((uint64_t)needed > quic_stream_window_left(client_v, s)) {
       rb_funcall(client_v, rb_intern("pump_once"), 0);
       quic_stream_check_writable(s);
     }
@@ -191,7 +278,7 @@ static VALUE quic_stream_write_nonblock_m(int argc, VALUE *argv, VALUE self) {
   TypedData_Get_Struct(self, quic_stream_t, &quic_stream_data_type, s);
   /* Before the window: a stream that cannot be written to never gets one. */
   quic_stream_check_writable(s);
-  uint64_t avail = quic_stream_window_left(self, client_v, s);
+  uint64_t avail = quic_stream_window_left(client_v, s);
 
   if (avail == 0) {
     rb_raise(rb_eQUICErrorWaitWritable, "stream send window is full");

@@ -1,3 +1,8 @@
+## [Unreleased]
+
+### Fixed
+- `QUIC::Stream` no longer resends corrupted data when a packet is lost and `GC.compact` (or auto-compaction) runs before the retransmission. What the peer has yet to acknowledge is now kept outside the Ruby heap, and `ObjectSpace.memsize_of` of the stream includes it. A C stream handler (the http3 gem) was not affected. ([#26](https://github.com/unasuke/quic-ruby/pull/26))
+
 ## [0.0.6] - 2026-11-03
 
 ### Added

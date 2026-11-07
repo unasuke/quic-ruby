@@ -312,7 +312,6 @@ class TestQUICClient < Minitest::Test
     stream = QUIC::Stream.allocate
     stream.instance_variable_set(:@id, 0)
     stream.instance_variable_set(:@client, client)
-    stream.instance_variable_set(:@pending_chunks, [])
     stream.instance_variable_set(:@recv_buffer, String.new(encoding: Encoding::BINARY))
 
     err = assert_raises(QUIC::Error::WaitWritable) { stream.write_nonblock("x") }
@@ -327,7 +326,6 @@ class TestQUICClient < Minitest::Test
     stream = QUIC::Stream.allocate
     stream.instance_variable_set(:@id, 0)
     stream.instance_variable_set(:@client, client)
-    stream.instance_variable_set(:@pending_chunks, [])
     stream.instance_variable_set(:@recv_buffer, String.new(encoding: Encoding::BINARY))
 
     assert_raises(QUIC::Error::NotBound) { stream.write("x") }

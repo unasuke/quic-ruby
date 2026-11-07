@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "objspace"
 
 # QUIC::Endpoint with Clients joined in memory (TestEndpointNetwork), so that
 # several clients, dropped packets and forged datagrams fit in one thread.
@@ -299,6 +300,67 @@ class TestQUICEndpoint < Minitest::Test
       read_to_end(stream, reply)
     end
     assert_equal "after compaction", reply
+  end
+
+  # The send buffer holds what was written until the peer acknowledges it,
+  # and no longer.
+  def test_acked_stream_data_is_released
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? }
+
+    stream = client.open_bidi_stream
+    before = ObjectSpace.memsize_of(stream)
+    assert_equal 10_000, stream.write_nonblock("a" * 10_000, fin: true)
+    assert_operator ObjectSpace.memsize_of(stream), :>=, before + 10_000
+
+    state = {}
+    reply = +""
+    net.run_until do
+      echo_streams(net.endpoint, state)
+      read_to_end(stream, reply) && ObjectSpace.memsize_of(stream) == before
+    end
+    assert_equal "a" * 10_000, reply
+  end
+
+  # ngtcp2 keeps a pointer into the bytes it was given until they are
+  # acknowledged, and retransmits from it. Lose the packet that carried them,
+  # compact, then let other Strings take the slots compaction freed: what
+  # arrives must still be what was written.
+  def test_stream_data_resent_after_gc_compaction_is_intact
+    probe = ObjectSpace.dump(String.new("x" * 500, encoding: Encoding::BINARY))
+    skip "a 500-byte String is not embedded on this Ruby" unless probe.include?('"embedded":true')
+
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? }
+
+    dropped = 0
+    net.drop = ->(_pkt, _client) {
+      dropped += 1
+      true
+    }
+    payload = (0...500).map { |i| (i % 251).chr }.join.b
+    server = net.endpoint.connections.first
+    assert_equal 500, server.open_bidi_stream.write_nonblock(payload, fin: true)
+    net.run_until { dropped >= 1 }
+
+    GC.verify_compaction_references(expand_heap: true, toward: :empty)
+    filler = Array.new(20_000) { "\xEE".b * 500 }
+
+    net.drop = nil
+    stream = nil
+    reply = +""
+    net.run_until do
+      stream ||= begin
+        client.accept_stream_nonblock
+      rescue QUIC::Error::WaitReadable
+        nil
+      end
+      stream && read_to_end(stream, reply)
+    end
+    assert_equal payload, reply
+    assert_equal 20_000, filler.size
   end
 
   private
