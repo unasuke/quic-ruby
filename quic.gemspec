@@ -17,7 +17,6 @@ Gem::Specification.new do |spec|
     "Public API is not yet stable."
   spec.homepage = "https://github.com/unasuke/quic-ruby"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.2.0"
 
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
   spec.metadata["homepage_uri"] = spec.homepage
