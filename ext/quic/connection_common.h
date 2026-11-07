@@ -65,11 +65,18 @@ typedef struct {
      ptls_get_data_ptr. The ref must outlive the ptls_t. */
   ngtcp2_crypto_conn_ref conn_ref;
   /* Back-reference to the Client or Server Ruby object that owns this
-     struct. ngtcp2 stream callbacks receive a void* user_data equal to this
-     struct, and they look up @streams via owner. We are stored INSIDE owner
-     via TypedData_Wrap_Struct, so owner is guaranteed alive while we exist
-     (no dmark needed). GC.compact may relocate owner, so quic_conn_compact
-     updates this field via rb_gc_location. */
+     struct. ngtcp2 callbacks receive a void* user_data equal to this
+     struct, and reach @streams and @accept_queue via owner. We are stored
+     INSIDE owner via TypedData_Wrap_Struct, so owner is guaranteed alive
+     while we exist (no dmark needed). GC.compact may relocate owner, so
+     quic_conn_compact updates this field via rb_gc_location.
+
+     A stream's callbacks get its QUIC::Stream's quic_stream_t from
+     ngtcp2's stream_user_data, which is only safe while @streams keeps
+     that Stream alive. So a Stream goes into @streams before ngtcp2 is
+     given its struct, and leaves only at the end of the stream_close
+     callback, which must not fail after that: a failing stream_close
+     leaves the stream in ngtcp2, pointing at a struct GC may free. */
   VALUE owner;
   /* An exception raised by Ruby code inside an ngtcp2 callback, caught with
      rb_protect so that it does not unwind through ngtcp2's frames. #read_pkt,

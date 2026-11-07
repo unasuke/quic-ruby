@@ -363,6 +363,37 @@ class TestQUICEndpoint < Minitest::Test
     assert_equal 20_000, filler.size
   end
 
+  # A stream's callbacks reach its QUIC::Stream through ngtcp2's
+  # stream_user_data and the back-reference in it, which has to follow the
+  # Stream when compaction moves it. Nothing here holds the client's Stream
+  # across the compaction, since a reference from the stack would pin it.
+  def test_stream_receives_data_after_gc_compaction
+    net = endpoint_network(tls_context)
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? }
+
+    id = client.open_bidi_stream.tap { |s| s.write_nonblock("ping") }.id
+    server = net.endpoint.connections.first
+    server_stream = nil
+    received = +""
+    net.run_until do
+      server_stream ||= begin
+        server.accept_stream_nonblock
+      rescue QUIC::Error::WaitReadable
+        nil
+      end
+      server_stream && (read_to_end(server_stream, received) || received) == "ping"
+    end
+
+    GC.verify_compaction_references(expand_heap: true, toward: :empty)
+
+    server_stream.write_nonblock("pong", fin: true)
+    stream = client.instance_variable_get(:@streams).fetch(id)
+    reply = +""
+    net.run_until { read_to_end(stream, reply) }
+    assert_equal "pong", reply
+  end
+
   private
 
   def tls_context

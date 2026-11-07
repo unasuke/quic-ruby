@@ -30,12 +30,18 @@ static size_t quic_stream_size(const void *ptr) {
   return sizeof(quic_stream_t) + ((const quic_stream_t *)ptr)->buffered;
 }
 
+static void quic_stream_compact(void *ptr) {
+  quic_stream_t *s = (quic_stream_t *)ptr;
+  s->self = rb_gc_location(s->self);
+}
+
 const rb_data_type_t quic_stream_data_type = {
     "QUIC::Stream",
     {
         NULL,
         quic_stream_free,
         quic_stream_size,
+        quic_stream_compact,
     },
     NULL,
     NULL,
@@ -45,7 +51,9 @@ const rb_data_type_t quic_stream_data_type = {
 static VALUE quic_stream_alloc(VALUE klass) {
   quic_stream_t *s = ALLOC(quic_stream_t);
   memset(s, 0, sizeof(*s));
-  return TypedData_Wrap_Struct(klass, &quic_stream_data_type, s);
+  VALUE self = TypedData_Wrap_Struct(klass, &quic_stream_data_type, s);
+  s->self = self;
+  return self;
 }
 
 VALUE

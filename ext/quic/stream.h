@@ -20,6 +20,11 @@ typedef struct quic_send_chunk {
 } quic_send_chunk;
 
 typedef struct {
+  /* The QUIC::Stream wrapping this struct, for the stream callbacks, which
+     get the struct from ngtcp2's stream_user_data. It needs no mark, as it
+     holds the struct; quic_stream_compact follows it when GC.compact moves
+     it. */
+  VALUE self;
   int64_t stream_id;
   /* The send buffer: what #write queued and the peer has not acknowledged,
      as chunks in stream order. Every offset below is a position in the

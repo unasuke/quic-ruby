@@ -373,16 +373,28 @@ void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v) {
                  &c->alpn_count, &c->alpn_buf);
 }
 
-/* Shared helper: look up the QUIC::Stream registered for stream_id in the
-   owner connection's @streams Hash. Returns Qnil if not found (which can
-   happen if the stream was already removed by a previous stream_close
-   callback). */
-static VALUE quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id) {
+/* Make a QUIC::Stream for stream_id, a stream ngtcp2 has just opened, put
+   it in @streams, and only then hand its quic_stream_t to ngtcp2 as the
+   stream's stream_user_data: ngtcp2 must never point at a Stream that
+   @streams does not keep alive (see quic_conn_t.owner). Returns the
+   Stream. */
+static VALUE quic_conn_add_stream(quic_conn_t *c, int64_t stream_id) {
+  VALUE stream = quic_stream_new(stream_id, c->owner);
   VALUE streams = rb_ivar_get(c->owner, rb_intern("@streams"));
-  return rb_hash_aref(streams, LL2NUM(stream_id));
+  rb_hash_aset(streams, LL2NUM(stream_id), stream);
+
+  quic_stream_t *s;
+  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  int rv = ngtcp2_conn_set_stream_user_data(c->conn, stream_id, s);
+  if (rv != 0)
+    quic_raise_ngtcp2_error(rv);
+  return stream;
 }
 
-/* ngtcp2 stream callbacks. The Ruby-touching part of each is a *_body
+/* ngtcp2 stream callbacks. Each gets the stream's quic_stream_t as
+   stream_user_data, or NULL for a stream whose QUIC::Stream could not be
+   made, which it ignores. The callbacks that touch Ruby objects
+   (stream_open, recv_stream_data and stream_close) do that in a *_body
    function run under rb_protect by quic_conn_protect, so that an exception
    (a frozen @streams, an allocation failure, ...) never unwinds through
    ngtcp2. The callback then returns NGTCP2_ERR_CALLBACK_FAILURE and the
@@ -392,23 +404,17 @@ static VALUE quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id) {
    rb_protect's single VALUE. Each body reads only the fields it needs. */
 struct quic_stream_cb_args {
   quic_conn_t *c;
+  quic_stream_t *s;
   int64_t stream_id;
   uint32_t flags;
   const uint8_t *data;
   size_t datalen;
-  uint64_t offset;
-  uint64_t acked;
   uint64_t app_error_code;
 };
 
 static VALUE quic_stream_open_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
-  if (!NIL_P(rb_hash_aref(streams, LL2NUM(a->stream_id)))) {
-    return Qnil; /* already known (opened by this endpoint) */
-  }
-  VALUE stream = quic_stream_new(a->stream_id, a->c->owner);
-  rb_hash_aset(streams, LL2NUM(a->stream_id), stream);
+  quic_conn_add_stream(a->c, a->stream_id);
   return Qnil;
 }
 
@@ -419,6 +425,7 @@ void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id) {
   }
 }
 
+/* Called only for a stream the peer opened. */
 static int quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id,
                                void *user_data) {
   (void)conn;
@@ -432,12 +439,8 @@ static int quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id,
 static VALUE quic_recv_stream_data_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
   quic_conn_t *c = a->c;
-  VALUE stream = quic_conn_lookup_stream(c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  quic_stream_t *s = a->s;
+  VALUE stream = s->self;
 
   /* Surface peer-initiated streams to #accept_stream. The low stream-id bit
      marks the initiator (0 == client, 1 == server), so a client queues the
@@ -466,7 +469,6 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
                                     const uint8_t *data, size_t datalen,
                                     void *user_data, void *stream_user_data) {
   (void)offset;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     size_t consumed = 0;
@@ -486,8 +488,11 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
     }
     return 0;
   }
+  if (stream_user_data == NULL)
+    return 0;
   struct quic_stream_cb_args a = {
       .c = c,
+      .s = (quic_stream_t *)stream_user_data,
       .stream_id = stream_id,
       .flags = flags,
       .data = data,
@@ -496,46 +501,26 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
   return quic_conn_protect(c, quic_recv_stream_data_body, &a);
 }
 
-static VALUE quic_acked_stream_data_offset_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  quic_stream_release_acked(s, a->offset, a->acked);
-  return Qnil;
-}
-
 static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
                                             int64_t stream_id, uint64_t offset,
                                             uint64_t datalen, void *user_data,
                                             void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     return c->handler->acked_stream_data(c->handler_ud, stream_id, datalen) < 0
                ? NGTCP2_ERR_CALLBACK_FAILURE
                : 0;
   }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .offset = offset, .acked = datalen};
-  return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
+  if (stream_user_data != NULL)
+    quic_stream_release_acked((quic_stream_t *)stream_user_data, offset,
+                              datalen);
+  return 0;
 }
 
 static VALUE quic_stream_close_body(VALUE arg) {
   struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
-  VALUE stream = rb_hash_aref(streams, LL2NUM(a->stream_id));
-  if (NIL_P(stream)) {
-    quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
-    return Qnil;
-  }
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+  quic_stream_t *s = a->s;
   s->closed = true;
   if (a->flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
     s->close_has_app_error_code = true;
@@ -555,6 +540,7 @@ static VALUE quic_stream_close_body(VALUE arg) {
   }
   /* Last, and nothing that can fail after it: should this callback fail,
      ngtcp2 keeps the stream, and the Stream must stay in @streams. */
+  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
   rb_hash_delete(streams, LL2NUM(a->stream_id));
   return Qnil;
 }
@@ -562,7 +548,6 @@ static VALUE quic_stream_close_body(VALUE arg) {
 static int quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                                 int64_t stream_id, uint64_t app_error_code,
                                 void *user_data, void *stream_user_data) {
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     /* The handler keeps no stream waiting for the application, so the peer
@@ -574,8 +559,13 @@ static int quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                ? NGTCP2_ERR_CALLBACK_FAILURE
                : 0;
   }
+  if (stream_user_data == NULL) {
+    quic_conn_give_back_peer_stream(conn, stream_id);
+    return 0;
+  }
   struct quic_stream_cb_args a = {
       .c = c,
+      .s = (quic_stream_t *)stream_user_data,
       .stream_id = stream_id,
       .flags = flags,
       .app_error_code = app_error_code,
@@ -583,25 +573,10 @@ static int quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
   return quic_conn_protect(c, quic_stream_close_body, &a);
 }
 
-static VALUE quic_stream_reset_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->reset = true;
-  s->close_app_error_code = a->app_error_code;
-  s->close_has_app_error_code = true;
-  return Qnil;
-}
-
 static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
                                 uint64_t final_size, uint64_t app_error_code,
                                 void *user_data, void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     return c->handler->stream_reset(c->handler_ud, stream_id, final_size,
@@ -609,9 +584,13 @@ static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
                ? NGTCP2_ERR_CALLBACK_FAILURE
                : 0;
   }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
-  return quic_conn_protect(c, quic_stream_reset_body, &a);
+  quic_stream_t *s = (quic_stream_t *)stream_user_data;
+  if (s != NULL) {
+    s->reset = true;
+    s->close_app_error_code = app_error_code;
+    s->close_has_app_error_code = true;
+  }
+  return 0;
 }
 
 /* Nothing queued on the stream can go out any more: have #write_pkt skip
@@ -625,19 +604,6 @@ static void quic_stream_stop(quic_stream_t *s) {
   s->stopped = true;
 }
 
-static VALUE quic_recv_stop_sending_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->stop_app_error_code = a->app_error_code;
-  quic_stream_stop(s);
-  return Qnil;
-}
-
 /* The peer sent STOP_SENDING. ngtcp2 shuts the send side and sends
    RESET_STREAM itself once this returns. A stream handler hears of it here
    (recv_stop_sending). One built against ABI 1.0 lacks that member, and
@@ -647,7 +613,6 @@ static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                      uint64_t app_error_code, void *user_data,
                                      void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
     if (!QUIC_EXT_HANDLER_HAS(c->handler, recv_stop_sending))
@@ -657,9 +622,12 @@ static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                ? NGTCP2_ERR_CALLBACK_FAILURE
                : 0;
   }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
-  return quic_conn_protect(c, quic_recv_stop_sending_body, &a);
+  quic_stream_t *s = (quic_stream_t *)stream_user_data;
+  if (s != NULL) {
+    s->stop_app_error_code = app_error_code;
+    quic_stream_stop(s);
+  }
+  return 0;
 }
 
 /* The callbacks below matter only to a stream handler. Without one, the
@@ -1094,11 +1062,7 @@ static VALUE quic_conn_open_bidi_stream(VALUE self) {
   int rv = ngtcp2_conn_open_bidi_stream(c->conn, &stream_id, NULL);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
-
-  VALUE stream = quic_stream_new(stream_id, self);
-  VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  rb_hash_aset(streams, LL2NUM(stream_id), stream);
-  return stream;
+  return quic_conn_add_stream(c, stream_id);
 }
 
 static VALUE quic_conn_open_uni_stream(VALUE self) {
@@ -1109,11 +1073,7 @@ static VALUE quic_conn_open_uni_stream(VALUE self) {
   int rv = ngtcp2_conn_open_uni_stream(c->conn, &stream_id, NULL);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
-
-  VALUE stream = quic_stream_new(stream_id, self);
-  VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  rb_hash_aset(streams, LL2NUM(stream_id), stream);
-  return stream;
+  return quic_conn_add_stream(c, stream_id);
 }
 
 /* Send an application CONNECTION_CLOSE (frame type 0x1d) to the peer and
