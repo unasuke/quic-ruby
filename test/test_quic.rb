@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "objspace"
 
 class TestQUIC < Minitest::Test
   include TestStreams
@@ -129,13 +130,13 @@ class TestQUIC < Minitest::Test
     assert_kind_of IO::WaitReadable, err
   end
 
-  def test_stream_write_returns_bytesize_and_queues_chunk
+  # The bytes are copied into the Stream's own send buffer, outside the
+  # Ruby heap, which its memsize counts.
+  def test_stream_write_returns_bytesize_and_holds_the_bytes
     s = build_stream(id: 0)
+    before = ObjectSpace.memsize_of(s)
     assert_equal 5, s.write("hello")
-    chunks = s.instance_variable_get(:@pending_chunks)
-    assert_equal 1, chunks.length
-    assert_equal "hello", chunks.first
-    assert_equal Encoding::BINARY, chunks.first.encoding
+    assert_operator ObjectSpace.memsize_of(s), :>=, before + 5
   end
 
   def test_stream_write_with_fin_sets_state

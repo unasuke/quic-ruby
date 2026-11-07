@@ -396,6 +396,7 @@ struct quic_stream_cb_args {
   uint32_t flags;
   const uint8_t *data;
   size_t datalen;
+  uint64_t offset;
   uint64_t acked;
   uint64_t app_error_code;
 };
@@ -503,25 +504,7 @@ static VALUE quic_acked_stream_data_offset_body(VALUE arg) {
 
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->acked_offset += a->acked;
-
-  /* Shift any head Chunks of @pending_chunks whose end-offset is fully
-     covered by acked_offset. Each Chunk's start-offset in the stream is
-     pending_shifted (after previous shifts); its end-offset is
-     pending_shifted + RSTRING_LEN(head). A stopped stream's
-     @pending_chunks is empty, and acks for what it sent before shift
-     nothing. */
-  VALUE pending = rb_ivar_get(stream, rb_intern("@pending_chunks"));
-  while (RARRAY_LEN(pending) > 0) {
-    VALUE head = RARRAY_AREF(pending, 0);
-    uint64_t head_end = s->pending_shifted + (uint64_t)RSTRING_LEN(head);
-    if (head_end <= s->acked_offset) {
-      rb_ary_shift(pending);
-      s->pending_shifted = head_end;
-    } else {
-      break;
-    }
-  }
+  quic_stream_release_acked(s, a->offset, a->acked);
   return Qnil;
 }
 
@@ -530,7 +513,6 @@ static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
                                             uint64_t datalen, void *user_data,
                                             void *stream_user_data) {
   (void)conn;
-  (void)offset;
   (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler) {
@@ -539,7 +521,7 @@ static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
                : 0;
   }
   struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .acked = datalen};
+      .c = c, .stream_id = stream_id, .offset = offset, .acked = datalen};
   return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
 }
 
@@ -559,6 +541,8 @@ static VALUE quic_stream_close_body(VALUE arg) {
     s->close_has_app_error_code = true;
     s->close_app_error_code = a->app_error_code;
   }
+  /* ngtcp2 never reads the stream's data again. */
+  quic_stream_free_send_buffer(s);
   /* A stream still waiting in @accept_queue holds on to what it received.
      Were the peer given its stream back now, it could open and close
      streams until the queue had used up our memory, so it gets the stream
@@ -569,6 +553,8 @@ static VALUE quic_stream_close_body(VALUE arg) {
   } else {
     quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
   }
+  /* Last, and nothing that can fail after it: should this callback fail,
+     ngtcp2 keeps the stream, and the Stream must stay in @streams. */
   rb_hash_delete(streams, LL2NUM(a->stream_id));
   return Qnil;
 }
@@ -628,15 +614,15 @@ static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
   return quic_conn_protect(c, quic_stream_reset_body, &a);
 }
 
-/* Nothing queued on stream can go out any more: drop it all, and have
-   #write_pkt skip the stream from now on. ngtcp2 retransmits no STREAM
-   frame of a stream it has reset, so it no longer reads the bytes it was
-   given either. */
-static void quic_stream_stop(VALUE stream) {
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
+/* Nothing queued on the stream can go out any more: have #write_pkt skip
+   it from now on. The send buffer stays until the stream closes. On
+   STOP_SENDING ngtcp2 calls recv_stop_sending before it drops the frames
+   it queued for the stream, which still point into the buffer, and should
+   it fail in between it keeps them. */
+static void quic_stream_stop(quic_stream_t *s) {
+  if (s->stopped)
+    return;
   s->stopped = true;
-  rb_ary_clear(rb_ivar_get(stream, rb_intern("@pending_chunks")));
 }
 
 static VALUE quic_recv_stop_sending_body(VALUE arg) {
@@ -648,7 +634,7 @@ static VALUE quic_recv_stop_sending_body(VALUE arg) {
   quic_stream_t *s;
   TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
   s->stop_app_error_code = a->app_error_code;
-  quic_stream_stop(stream);
+  quic_stream_stop(s);
   return Qnil;
 }
 
@@ -761,16 +747,14 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
-/* Find the first stream in @streams, stopped ones aside, that has either
-   pending bytes or a pending FIN to flush. Phase 4 minimum: linear scan,
-   take the first match (no round-robin). Sets *out_datav to the byte slice
-   to send, *out_datavcnt to 0 or 1, *out_flags to
-   NGTCP2_WRITE_STREAM_FLAG_FIN when applicable. Returns the stream's Ruby
-   VALUE (or Qnil if no candidate). */
-static VALUE quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
-                                        size_t *out_datavcnt,
-                                        uint32_t *out_flags,
-                                        int64_t *out_stream_id) {
+/* Find the first stream in @streams that has either pending bytes or a
+   pending FIN to flush (linear scan, first match, no round-robin), and
+   what it has to send (quic_stream_next_send). Returns NULL if no stream
+   has anything. */
+static quic_stream_t *quic_conn_pick_send_stream(VALUE self,
+                                                 ngtcp2_vec *out_datav,
+                                                 size_t *out_datavcnt,
+                                                 uint32_t *out_flags) {
   VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
   VALUE stream_values = rb_funcall(streams, rb_intern("values"), 0);
 
@@ -778,54 +762,10 @@ static VALUE quic_conn_pick_send_stream(VALUE self, ngtcp2_vec *out_datav,
     VALUE st = RARRAY_AREF(stream_values, i);
     quic_stream_t *s;
     TypedData_Get_Struct(st, quic_stream_t, &quic_stream_data_type, s);
-    if (s->fin_flushed || s->stopped)
-      continue;
-
-    VALUE pending = rb_ivar_get(st, rb_intern("@pending_chunks"));
-    uint64_t position = s->sent_offset - s->pending_shifted;
-    long chunks_count = RARRAY_LEN(pending);
-
-    /* Walk pending Chunks to find the one containing the next unsent byte. */
-    long chunk_idx = -1;
-    long offset_in_chunk = 0;
-    for (long j = 0; j < chunks_count; j++) {
-      VALUE chunk = RARRAY_AREF(pending, j);
-      long clen = RSTRING_LEN(chunk);
-      if (position < (uint64_t)clen) {
-        chunk_idx = j;
-        offset_in_chunk = (long)position;
-        break;
-      }
-      position -= (uint64_t)clen;
-    }
-
-    if (chunk_idx >= 0) {
-      VALUE chunk = RARRAY_AREF(pending, chunk_idx);
-      out_datav->base = (uint8_t *)RSTRING_PTR(chunk) + offset_in_chunk;
-      out_datav->len = (size_t)(RSTRING_LEN(chunk) - offset_in_chunk);
-      *out_datavcnt = 1;
-      *out_stream_id = s->stream_id;
-      /* Attach FIN if this is the LAST chunk and we're going to send all
-         remaining bytes of it (ngtcp2 may encode less, in which case FIN
-         won't actually be flushed and we'll retry next call). */
-      *out_flags = (s->fin_sent && chunk_idx == chunks_count - 1)
-                       ? NGTCP2_WRITE_STREAM_FLAG_FIN
-                       : 0;
-      return st;
-    }
-
-    if (s->fin_sent && !s->fin_flushed) {
-      /* No data to send but a pending FIN-only frame. */
-      out_datav->base = NULL;
-      out_datav->len = 0;
-      *out_datavcnt = 0;
-      *out_stream_id = s->stream_id;
-      *out_flags = NGTCP2_WRITE_STREAM_FLAG_FIN;
-      return st;
-    }
+    if (quic_stream_next_send(s, out_datav, out_datavcnt, out_flags))
+      return s;
   }
-
-  return Qnil;
+  return NULL;
 }
 
 /* #write_pkt for the QUIC::Stream mode. If any stream has pending bytes or
@@ -839,14 +779,13 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
   ngtcp2_vec datav;
   size_t datavcnt = 0;
   uint32_t writev_flags = 0;
-  int64_t send_stream_id = -1;
-  VALUE selected_stream = quic_conn_pick_send_stream(
-      self, &datav, &datavcnt, &writev_flags, &send_stream_id);
+  quic_stream_t *selected =
+      quic_conn_pick_send_stream(self, &datav, &datavcnt, &writev_flags);
 
   ngtcp2_ssize pdatalen = -1;
   ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-      c->conn, path, pi, dest, destlen, &pdatalen, writev_flags, send_stream_id,
-      &datav, datavcnt, c->now);
+      c->conn, path, pi, dest, destlen, &pdatalen, writev_flags,
+      selected != NULL ? selected->stream_id : -1, &datav, datavcnt, c->now);
 
   if ((n == NGTCP2_ERR_STREAM_DATA_BLOCKED || n == NGTCP2_ERR_STREAM_SHUT_WR) &&
       NIL_P(c->pending_exc)) {
@@ -855,12 +794,12 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
        peer extends its window (MAX_STREAM_DATA / MAX_DATA).
        SHUT_WR: ngtcp2 shut the stream's send side without recv_stop_sending
        marking the stream, as #reset does. What is queued can never go out,
-       so drop it.
+       so stop the stream.
        Either way, build the packet without the stream's data, so that ACKs
        and other frames still go out. */
     if (n == NGTCP2_ERR_STREAM_SHUT_WR)
-      quic_stream_stop(selected_stream);
-    selected_stream = Qnil;
+      quic_stream_stop(selected);
+    selected = NULL;
     datavcnt = 0;
     writev_flags = 0;
     pdatalen = -1;
@@ -871,29 +810,12 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
   if (n < 0 || !NIL_P(c->pending_exc))
     return n;
 
-  /* Update the selected stream's accounting only when we actually sent
-     bytes. pdatalen >= 0 means ngtcp2 framed that many data bytes into the
-     packet; if 0, no data was framed (but the packet may still contain ACK
-     or other frames). */
-  if (!NIL_P(selected_stream) && pdatalen > 0) {
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t, &quic_stream_data_type,
-                         s);
-    s->sent_offset += (uint64_t)pdatalen;
-    /* FIN is only actually written when all requested data fits in the
-       frame (see ngtcp2 docs on NGTCP2_WRITE_STREAM_FLAG_FIN). */
-    if ((writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN) &&
-        (size_t)pdatalen == datav.len) {
-      s->fin_flushed = true;
-    }
-  } else if (!NIL_P(selected_stream) && datavcnt == 0 && n > 0 &&
-             (writev_flags & NGTCP2_WRITE_STREAM_FLAG_FIN)) {
-    /* FIN-only packet (no data) was successfully written. */
-    quic_stream_t *s;
-    TypedData_Get_Struct(selected_stream, quic_stream_t, &quic_stream_data_type,
-                         s);
-    s->fin_flushed = true;
-  }
+  /* pdatalen >= 0 means ngtcp2 framed that many data bytes into the packet;
+     if 0, no data was framed (but the packet may still contain ACK or other
+     frames). */
+  if (selected != NULL)
+    quic_stream_sent(selected, datavcnt > 0 ? datav.len : 0, writev_flags,
+                     pdatalen, n);
   return n;
 }
 

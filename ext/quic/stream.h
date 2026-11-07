@@ -10,18 +10,35 @@ void Init_quic_stream(VALUE rb_mQUICArg);
 /* Internal helpers used by connection_common.c stream callbacks and
    write_pkt's stream-aware path. */
 
+/* One write's bytes, kept until the peer acknowledges them. Outside the
+   Ruby heap: ngtcp2 keeps pointers into data to retransmit from, and
+   GC.compact moves an embedded String. */
+typedef struct quic_send_chunk {
+  struct quic_send_chunk *next;
+  size_t len;
+  uint8_t data[];
+} quic_send_chunk;
+
 typedef struct {
   int64_t stream_id;
-  /* Cumulative bytes handed to ngtcp2 via writev_stream so far. Increases
-     monotonically; used to derive the next send position within
-     @pending_chunks. */
-  uint64_t sent_offset;
-  /* Cumulative bytes acked by the peer (per acked_stream_data_offset).
-     Increases monotonically. */
-  uint64_t acked_offset;
-  /* Cumulative bytes shifted out of @pending_chunks. Always
-     <= acked_offset (we only shift a Chunk after its end is acked). */
-  uint64_t pending_shifted;
+  /* The send buffer: what #write queued and the peer has not acknowledged,
+     as chunks in stream order. Every offset below is a position in the
+     stream. The buffer is freed only where ngtcp2 can no longer read it:
+     as the peer acknowledges it, when the stream closes, and in dfree. */
+  quic_send_chunk *send_head;
+  quic_send_chunk *send_tail;
+  /* The chunk holding the next byte to hand to ngtcp2 (sent_offset), and
+     where in it; NULL once everything queued has been handed over. That
+     chunk ends after sent_offset, which acked_offset never passes, so an
+     acknowledgement never frees it. */
+  quic_send_chunk *send_next;
+  size_t send_next_off;
+  uint64_t head_offset;   /* where send_head->data[0] sits */
+  uint64_t queued_offset; /* just past the last byte queued */
+  uint64_t sent_offset;   /* just past the last byte handed to ngtcp2 */
+  uint64_t acked_offset;  /* just past the last byte acknowledged */
+  /* What the chunks take from xmalloc, headers included; part of dsize. */
+  size_t buffered;
   bool fin_received; /* recv_stream_data delivered FIN */
   bool fin_sent;     /* #write(fin: true) queued FIN */
   bool fin_flushed;  /* write_pkt actually wrote the FIN frame */
@@ -30,9 +47,10 @@ typedef struct {
   uint64_t close_app_error_code;
   bool close_has_app_error_code;
   /* The send side is shut: the peer's STOP_SENDING arrived, or ngtcp2
-     reported the send side shut while writing. @pending_chunks has been
-     emptied, so the offsets above no longer describe it, and #write_pkt
-     skips the stream. */
+     reported the send side shut while writing. Nothing queued goes out any
+     more, and #write_pkt skips the stream. The send buffer stays until the
+     stream closes: ngtcp2 may still hold pointers into it at this point
+     (recv_stop_sending runs before it drops the stream's queued frames). */
   bool stopped;
   uint64_t stop_app_error_code; /* the STOP_SENDING's, 0 if none arrived */
   /* Set once a peer-initiated stream has been pushed onto the owning
@@ -50,8 +68,30 @@ extern const rb_data_type_t quic_stream_data_type;
 
 /* Allocate a new QUIC::Stream Ruby object for stream_id with a
    zero-initialized quic_stream_t, and set its ivars (@id / @client /
-   @pending_chunks / @recv_buffer). @client is owner, the Client or Server
-   the stream belongs to; the ivar keeps its name for both. */
+   @recv_buffer). @client is owner, the Client or Server the stream belongs
+   to; the ivar keeps its name for both. */
 VALUE quic_stream_new(int64_t stream_id, VALUE owner);
+
+/* What s has to send next: the unsent part of the chunk at send_next in
+   *datav (*datavcnt = 1), or nothing but a FIN (*datavcnt = 0). *flags gets
+   NGTCP2_WRITE_STREAM_FLAG_FIN when the FIN goes with it, that is when the
+   chunk is the last one queued. Returns false when s has nothing to send,
+   which includes a stopped stream. */
+bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
+                           size_t *datavcnt, uint32_t *flags);
+
+/* Account for a packet ngtcp2_conn_writev_stream built from what
+   quic_stream_next_send offered: datalen bytes (0 for a FIN alone) with
+   flags, of which ngtcp2 framed pdatalen, in a packet of n bytes. */
+void quic_stream_sent(quic_stream_t *s, size_t datalen, uint32_t flags,
+                      ngtcp2_ssize pdatalen, ngtcp2_ssize n);
+
+/* The peer acknowledged [offset, offset + datalen): free the chunks that
+   end at or before offset + datalen. */
+void quic_stream_release_acked(quic_stream_t *s, uint64_t offset,
+                               uint64_t datalen);
+
+/* Free the whole send buffer. Safe to call more than once. */
+void quic_stream_free_send_buffer(quic_stream_t *s);
 
 #endif /* QUIC_STREAM_H */
