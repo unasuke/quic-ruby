@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Bumps an action's tag in the workflows and its entry in
+  # .github/workflows/actions.lock in the same pull request.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

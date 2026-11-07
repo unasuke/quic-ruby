@@ -15,13 +15,13 @@ jobs:
       id-token: write
 
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      - uses: ruby/setup-ruby@v1.338.0
         with:
           ruby-version: ruby
 
@@ -40,7 +40,7 @@ jobs:
 
       # Tags from lib/quic/version.rb, pushes the gem. The gem is source only;
       # there is no precompiled platform gem to build or push alongside it.
-      - uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
+      - uses: rubygems/release-gem@v1.4.1
 
       - name: Create GitHub release
         run: |
