@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.0.7] - 2026-11-08
 
 ### Changed
 - `QUIC::Stream#write` and `#write_nonblock` count the data queued on every stream of the connection against the connection's flow control window, not only their own stream's. ([#27](https://github.com/unasuke/quic-ruby/pull/27))
