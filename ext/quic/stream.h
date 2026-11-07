@@ -8,9 +8,6 @@ extern VALUE rb_cQUICStream;
 
 void Init_quic_stream(VALUE rb_mQUICArg);
 
-/* Internal helpers used by connection_common.c stream callbacks and
-   write_pkt's stream-aware path. */
-
 /* One write's bytes, kept until the peer acknowledges them. Outside the
    Ruby heap: ngtcp2 keeps pointers into data to retransmit from, and
    GC.compact moves an embedded String. */
@@ -72,38 +69,35 @@ typedef struct {
   bool peer_stream_held;
 } quic_stream_t;
 
-extern const rb_data_type_t quic_stream_data_type;
+/* What a connection without a stream handler does with its streams, as
+   QUIC::Streams. connection_common.c hands its ngtcp2 stream callbacks and
+   #write_pkt here, and keeps only the choice between this and the
+   handler. */
 
-/* Allocate a new QUIC::Stream Ruby object for stream_id with a
-   zero-initialized quic_stream_t, and set its ivars (@id / @client /
-   @recv_buffer). @client is owner, the Client or Server the stream belongs
-   to; the ivar keeps its name for both. */
-VALUE quic_stream_new(int64_t stream_id, VALUE owner);
+/* Make a QUIC::Stream for stream_id, a stream #open_bidi_stream or
+   #open_uni_stream has just opened on the connection self (wrapping c),
+   and register it. Returns the Stream. */
+VALUE quic_stream_open_local(VALUE self, quic_conn_t *c, int64_t stream_id);
 
-/* What s has to send next: the unsent part of the chunk at send_next in
-   *datav (*datavcnt = 1), or nothing but a FIN (*datavcnt = 0). *flags gets
-   NGTCP2_WRITE_STREAM_FLAG_FIN when the FIN goes with it, that is when the
-   chunk is the last one queued. Returns false when s has nothing to send,
-   which includes a stopped stream. */
-bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
-                           size_t *datavcnt, uint32_t *flags);
+/* The ngtcp2 stream callbacks. s is the stream's stream_user_data: NULL for
+   a stream whose QUIC::Stream could not be made, which they ignore. Those
+   returning int return 0, or NGTCP2_ERR_CALLBACK_FAILURE when Ruby code
+   raised; the exception waits in c->pending_exc. */
+int quic_stream_on_open(quic_conn_t *c, int64_t stream_id);
+int quic_stream_on_recv_data(quic_conn_t *c, quic_stream_t *s, uint32_t flags,
+                             const uint8_t *data, size_t datalen);
+void quic_stream_on_acked(quic_stream_t *s, uint64_t offset, uint64_t datalen);
+int quic_stream_on_close(quic_conn_t *c, quic_stream_t *s, int64_t stream_id,
+                         uint32_t flags, uint64_t app_error_code);
+void quic_stream_on_reset(quic_stream_t *s, uint64_t app_error_code);
+void quic_stream_on_recv_stop_sending(quic_conn_t *c, quic_stream_t *s,
+                                      uint64_t app_error_code);
 
-/* Account for a packet ngtcp2_conn_writev_stream built for c from what
-   quic_stream_next_send offered: datalen bytes (0 for a FIN alone) with
-   flags, of which ngtcp2 framed pdatalen, in a packet of n bytes. */
-void quic_stream_sent(quic_conn_t *c, quic_stream_t *s, size_t datalen,
-                      uint32_t flags, ngtcp2_ssize pdatalen, ngtcp2_ssize n);
-
-/* Shut the send side of s, a stream of c (NULL for a bare Stream): nothing
-   it has queued goes out any more. Does nothing the second time. */
-void quic_stream_stop(quic_conn_t *c, quic_stream_t *s);
-
-/* The peer acknowledged [offset, offset + datalen): free the chunks that
-   end at or before offset + datalen. */
-void quic_stream_release_acked(quic_stream_t *s, uint64_t offset,
-                               uint64_t datalen);
-
-/* Free the whole send buffer. Safe to call more than once. */
-void quic_stream_free_send_buffer(quic_stream_t *s);
+/* #write_pkt for the connection self (wrapping c): build the next packet
+   into dest, with data from the first stream in @streams that has any.
+   Returns what ngtcp2_conn_writev_stream returned. Raises nothing. */
+ngtcp2_ssize quic_streams_write_pkt(VALUE self, quic_conn_t *c,
+                                    ngtcp2_path *path, ngtcp2_pkt_info *pi,
+                                    uint8_t *dest, size_t destlen);
 
 #endif /* QUIC_STREAM_H */

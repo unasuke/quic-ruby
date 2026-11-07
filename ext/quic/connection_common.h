@@ -146,6 +146,12 @@ VALUE quic_conn_alloc(VALUE klass);
 /* CLOCK_MONOTONIC in ngtcp2's units (nanoseconds). */
 ngtcp2_tstamp quic_now(void);
 
+/* Run body(arg), Ruby code an ngtcp2 callback of c calls, under rb_protect.
+   An exception is kept in c->pending_exc (the first one wins; ngtcp2 stops
+   at the first failing callback anyway) and turned into
+   NGTCP2_ERR_CALLBACK_FAILURE, so that it never unwinds through ngtcp2. */
+int quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg);
+
 /* Build the next packet of the connection self (wrapping c) into dest of
    QUIC_WRITE_PKT_BUFLEN bytes, as #write_pkt does, and store its path in
    *path. Returns the packet's length, 0 when there is nothing to send, or a
