@@ -3,6 +3,7 @@
 ### Changed
 - `QUIC::Stream#write` and `#write_nonblock` count the data queued on every stream of the connection against the connection's flow control window, not only their own stream's. ([#27](https://github.com/unasuke/quic-ruby/pull/27))
 - `#close` of `QUIC::Connection::Client` and `Server` raises `ArgumentError` for an unknown keyword instead of ignoring it. ([#27](https://github.com/unasuke/quic-ruby/pull/27))
+- The gem no longer declares a minimum Ruby version (was `>= 3.2.0`). It is tested on Ruby 3.4 and 4.0. ([#28](https://github.com/unasuke/quic-ruby/pull/28))
 
 ### Fixed
 - `QUIC::Stream` no longer resends corrupted data when a packet is lost and `GC.compact` (or auto-compaction) runs before the retransmission. What the peer has yet to acknowledge is now kept outside the Ruby heap, and `ObjectSpace.memsize_of` of the stream includes it. A C stream handler (the http3 gem) was not affected. ([#26](https://github.com/unasuke/quic-ruby/pull/26))

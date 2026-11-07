@@ -12,6 +12,7 @@ jobs:
     strategy:
       matrix:
         ruby:
+          - '3.4'
           - '4.0'
 
     steps:
@@ -31,6 +32,6 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tmp
-          key: ports-${{ runner.os }}-ngtcp2-1.26.0-picotls-a2d95de-${{ hashFiles('ext/quic/extconf.rb', 'ext/quic/patches/**') }}
+          key: ports-${{ runner.os }}-ruby-${{ matrix.ruby }}-ngtcp2-1.26.0-picotls-a2d95de-${{ hashFiles('ext/quic/extconf.rb', 'ext/quic/patches/**') }}
       - name: Run the default task
         run: bundle exec rake
