@@ -65,11 +65,18 @@ typedef struct {
      ptls_get_data_ptr. The ref must outlive the ptls_t. */
   ngtcp2_crypto_conn_ref conn_ref;
   /* Back-reference to the Client or Server Ruby object that owns this
-     struct. ngtcp2 stream callbacks receive a void* user_data equal to this
-     struct, and they look up @streams via owner. We are stored INSIDE owner
-     via TypedData_Wrap_Struct, so owner is guaranteed alive while we exist
-     (no dmark needed). GC.compact may relocate owner, so quic_conn_compact
-     updates this field via rb_gc_location. */
+     struct. ngtcp2 callbacks receive a void* user_data equal to this
+     struct, and reach @streams and @accept_queue via owner. We are stored
+     INSIDE owner via TypedData_Wrap_Struct, so owner is guaranteed alive
+     while we exist (no dmark needed). GC.compact may relocate owner, so
+     quic_conn_compact updates this field via rb_gc_location.
+
+     A stream's callbacks get its QUIC::Stream's quic_stream_t from
+     ngtcp2's stream_user_data, which is only safe while @streams keeps
+     that Stream alive. So a Stream goes into @streams before ngtcp2 is
+     given its struct, and leaves only at the end of the stream_close
+     callback, which must not fail after that: a failing stream_close
+     leaves the stream in ngtcp2, pointing at a struct GC may free. */
   VALUE owner;
   /* An exception raised by Ruby code inside an ngtcp2 callback, caught with
      rb_protect so that it does not unwind through ngtcp2's frames. #read_pkt,
@@ -94,6 +101,11 @@ typedef struct {
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
+  /* The bytes the QUIC::Streams of this connection have queued and not yet
+     handed to ngtcp2, stopped streams excepted. ngtcp2 takes off the
+     connection's flow control window only what it has sent, so #write and
+     #write_nonblock take this off as well. */
+  uint64_t stream_unsent;
   /* <qlog_dir>/<SCID>.sqlog while ngtcp2 writes qlog to it, else NULL.
      quic_conn_close_qlog closes it as soon as the connection ends;
      NGTCP2_QLOG_WRITE_FLAG_FIN, sent by ngtcp2_conn_del, closes one still
@@ -133,6 +145,12 @@ VALUE quic_conn_alloc(VALUE klass);
 
 /* CLOCK_MONOTONIC in ngtcp2's units (nanoseconds). */
 ngtcp2_tstamp quic_now(void);
+
+/* Run body(arg), Ruby code an ngtcp2 callback of c calls, under rb_protect.
+   An exception is kept in c->pending_exc (the first one wins; ngtcp2 stops
+   at the first failing callback anyway) and turned into
+   NGTCP2_ERR_CALLBACK_FAILURE, so that it never unwinds through ngtcp2. */
+int quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg);
 
 /* Build the next packet of the connection self (wrapping c) into dest of
    QUIC_WRITE_PKT_BUFLEN bytes, as #write_pkt does, and store its path in

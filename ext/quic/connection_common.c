@@ -121,11 +121,7 @@ static void quic_conn_raise_pending(quic_conn_t *c) {
   rb_exc_raise(exc);
 }
 
-/* Run body(arg) under rb_protect. An exception is kept in c->pending_exc
-   (the first one wins; ngtcp2 stops at the first failing callback anyway)
-   and turned into NGTCP2_ERR_CALLBACK_FAILURE, so that it never unwinds
-   through ngtcp2. */
-static int quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg) {
+int quic_conn_protect(quic_conn_t *c, VALUE (*body)(VALUE), void *arg) {
   int state = 0;
   rb_protect(body, (VALUE)arg, &state);
   if (state == 0)
@@ -373,45 +369,6 @@ void quic_conn_copy_alpn(quic_conn_t *c, VALUE settings_v) {
                  &c->alpn_count, &c->alpn_buf);
 }
 
-/* Shared helper: look up the QUIC::Stream registered for stream_id in the
-   owner connection's @streams Hash. Returns Qnil if not found (which can
-   happen if the stream was already removed by a previous stream_close
-   callback). */
-static VALUE quic_conn_lookup_stream(quic_conn_t *c, int64_t stream_id) {
-  VALUE streams = rb_ivar_get(c->owner, rb_intern("@streams"));
-  return rb_hash_aref(streams, LL2NUM(stream_id));
-}
-
-/* ngtcp2 stream callbacks. The Ruby-touching part of each is a *_body
-   function run under rb_protect by quic_conn_protect, so that an exception
-   (a frozen @streams, an allocation failure, ...) never unwinds through
-   ngtcp2. The callback then returns NGTCP2_ERR_CALLBACK_FAILURE and the
-   exception is re-raised once ngtcp2 has returned. */
-
-/* The arguments of a stream callback, handed to its body through
-   rb_protect's single VALUE. Each body reads only the fields it needs. */
-struct quic_stream_cb_args {
-  quic_conn_t *c;
-  int64_t stream_id;
-  uint32_t flags;
-  const uint8_t *data;
-  size_t datalen;
-  uint64_t offset;
-  uint64_t acked;
-  uint64_t app_error_code;
-};
-
-static VALUE quic_stream_open_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
-  if (!NIL_P(rb_hash_aref(streams, LL2NUM(a->stream_id)))) {
-    return Qnil; /* already known (opened by this endpoint) */
-  }
-  VALUE stream = quic_stream_new(a->stream_id, a->c->owner);
-  rb_hash_aset(streams, LL2NUM(a->stream_id), stream);
-  return Qnil;
-}
-
 void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id) {
   if (!ngtcp2_conn_is_local_stream2(conn, stream_id) &&
       ngtcp2_is_bidi_stream(stream_id)) {
@@ -419,46 +376,80 @@ void quic_conn_give_back_peer_stream(ngtcp2_conn *conn, int64_t stream_id) {
   }
 }
 
+/* The ngtcp2 stream callbacks hand each stream to the stream handler (the
+   quic_handler_* functions below) or, without one, to its QUIC::Stream
+   (quic_stream_on_* in stream.c). */
+
+static int quic_handler_recv_stream_data(quic_conn_t *c, ngtcp2_conn *conn,
+                                         uint32_t flags, int64_t stream_id,
+                                         const uint8_t *data, size_t datalen) {
+  size_t consumed = 0;
+  int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
+  if (c->handler->recv_stream_data(c->handler_ud, stream_id, data, datalen, fin,
+                                   c->now, &consumed) < 0) {
+    return NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+  /* What the handler consumed outright (for HTTP/3, everything but the
+     request body) goes straight back to the peer as credit. */
+  if (consumed > 0) {
+    if (ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed) != 0) {
+      return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+    ngtcp2_conn_extend_max_offset(conn, consumed);
+  }
+  return 0;
+}
+
+static int quic_handler_acked_stream_data(quic_conn_t *c, int64_t stream_id,
+                                          uint64_t datalen) {
+  return c->handler->acked_stream_data(c->handler_ud, stream_id, datalen) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
+}
+
+static int quic_handler_stream_close(quic_conn_t *c, ngtcp2_conn *conn,
+                                     uint32_t flags, int64_t stream_id,
+                                     uint64_t app_error_code) {
+  /* The handler keeps no stream waiting for the application, so the peer
+     gets its stream back at once. */
+  quic_conn_give_back_peer_stream(conn, stream_id);
+  int has_code = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) != 0;
+  return c->handler->stream_close(c->handler_ud, stream_id, has_code,
+                                  app_error_code) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
+}
+
+static int quic_handler_stream_reset(quic_conn_t *c, int64_t stream_id,
+                                     uint64_t final_size,
+                                     uint64_t app_error_code) {
+  return c->handler->stream_reset(c->handler_ud, stream_id, final_size,
+                                  app_error_code) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
+}
+
+/* A handler built against ABI 1.0 lacks recv_stop_sending, and learns of
+   STOP_SENDING only when #write_pkt finds the send side shut
+   (stream_shut_write) or the stream closes. */
+static int quic_handler_recv_stop_sending(quic_conn_t *c, int64_t stream_id,
+                                          uint64_t app_error_code) {
+  if (!QUIC_EXT_HANDLER_HAS(c->handler, recv_stop_sending))
+    return 0;
+  return c->handler->recv_stop_sending(c->handler_ud, stream_id,
+                                       app_error_code) < 0
+             ? NGTCP2_ERR_CALLBACK_FAILURE
+             : 0;
+}
+
+/* Called only for a stream the peer opened. */
 static int quic_stream_open_cb(ngtcp2_conn *conn, int64_t stream_id,
                                void *user_data) {
   (void)conn;
   quic_conn_t *c = (quic_conn_t *)user_data;
   if (c->handler)
     return 0; /* the handler keeps its own stream state */
-  struct quic_stream_cb_args a = {.c = c, .stream_id = stream_id};
-  return quic_conn_protect(c, quic_stream_open_body, &a);
-}
-
-static VALUE quic_recv_stream_data_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  quic_conn_t *c = a->c;
-  VALUE stream = quic_conn_lookup_stream(c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-
-  /* Surface peer-initiated streams to #accept_stream. The low stream-id bit
-     marks the initiator (0 == client, 1 == server), so a client queues the
-     odd ids and a server the even ones. Push once, on first data arrival,
-     then mark so later data does not re-enqueue. */
-  bool peer_initiated =
-      c->is_server ? !(a->stream_id & 0x01) : (a->stream_id & 0x01);
-  if (!s->accept_queued && peer_initiated) {
-    VALUE accept_queue = rb_ivar_get(c->owner, rb_intern("@accept_queue"));
-    rb_ary_push(accept_queue, stream);
-    s->accept_queued = true;
-  }
-
-  if (a->datalen > 0) {
-    VALUE recv_buffer = rb_ivar_get(stream, rb_intern("@recv_buffer"));
-    rb_str_buf_cat(recv_buffer, (const char *)a->data, (long)a->datalen);
-  }
-  if (a->flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
-    s->fin_received = true;
-  }
-  return Qnil;
+  return quic_stream_on_open(c, stream_id);
 }
 
 static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
@@ -466,46 +457,11 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
                                     const uint8_t *data, size_t datalen,
                                     void *user_data, void *stream_user_data) {
   (void)offset;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) {
-    size_t consumed = 0;
-    int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
-    if (c->handler->recv_stream_data(c->handler_ud, stream_id, data, datalen,
-                                     fin, c->now, &consumed) < 0) {
-      return NGTCP2_ERR_CALLBACK_FAILURE;
-    }
-    /* What the handler consumed outright (for HTTP/3, everything but the
-       request body) goes straight back to the peer as credit. */
-    if (consumed > 0) {
-      if (ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed) !=
-          0) {
-        return NGTCP2_ERR_CALLBACK_FAILURE;
-      }
-      ngtcp2_conn_extend_max_offset(conn, consumed);
-    }
-    return 0;
-  }
-  struct quic_stream_cb_args a = {
-      .c = c,
-      .stream_id = stream_id,
-      .flags = flags,
-      .data = data,
-      .datalen = datalen,
-  };
-  return quic_conn_protect(c, quic_recv_stream_data_body, &a);
-}
-
-static VALUE quic_acked_stream_data_offset_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  quic_stream_release_acked(s, a->offset, a->acked);
-  return Qnil;
+  if (c->handler)
+    return quic_handler_recv_stream_data(c, conn, flags, stream_id, data,
+                                         datalen);
+  return quic_stream_on_recv_data(c, stream_user_data, flags, data, datalen);
 }
 
 static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
@@ -513,153 +469,45 @@ static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn,
                                             uint64_t datalen, void *user_data,
                                             void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) {
-    return c->handler->acked_stream_data(c->handler_ud, stream_id, datalen) < 0
-               ? NGTCP2_ERR_CALLBACK_FAILURE
-               : 0;
-  }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .offset = offset, .acked = datalen};
-  return quic_conn_protect(c, quic_acked_stream_data_offset_body, &a);
-}
-
-static VALUE quic_stream_close_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE streams = rb_ivar_get(a->c->owner, rb_intern("@streams"));
-  VALUE stream = rb_hash_aref(streams, LL2NUM(a->stream_id));
-  if (NIL_P(stream)) {
-    quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
-    return Qnil;
-  }
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->closed = true;
-  if (a->flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
-    s->close_has_app_error_code = true;
-    s->close_app_error_code = a->app_error_code;
-  }
-  /* ngtcp2 never reads the stream's data again. */
-  quic_stream_free_send_buffer(s);
-  /* A stream still waiting in @accept_queue holds on to what it received.
-     Were the peer given its stream back now, it could open and close
-     streams until the queue had used up our memory, so it gets the stream
-     back only once the application has accepted this one
-     (QUIC::Stream#_accepted). */
-  if (s->accept_queued && !s->accepted) {
-    s->peer_stream_held = true;
-  } else {
-    quic_conn_give_back_peer_stream(a->c->conn, a->stream_id);
-  }
-  /* Last, and nothing that can fail after it: should this callback fail,
-     ngtcp2 keeps the stream, and the Stream must stay in @streams. */
-  rb_hash_delete(streams, LL2NUM(a->stream_id));
-  return Qnil;
+  if (c->handler)
+    return quic_handler_acked_stream_data(c, stream_id, datalen);
+  quic_stream_on_acked(stream_user_data, offset, datalen);
+  return 0;
 }
 
 static int quic_stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                                 int64_t stream_id, uint64_t app_error_code,
                                 void *user_data, void *stream_user_data) {
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) {
-    /* The handler keeps no stream waiting for the application, so the peer
-       gets its stream back at once. */
-    quic_conn_give_back_peer_stream(conn, stream_id);
-    int has_code = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) != 0;
-    return c->handler->stream_close(c->handler_ud, stream_id, has_code,
-                                    app_error_code) < 0
-               ? NGTCP2_ERR_CALLBACK_FAILURE
-               : 0;
-  }
-  struct quic_stream_cb_args a = {
-      .c = c,
-      .stream_id = stream_id,
-      .flags = flags,
-      .app_error_code = app_error_code,
-  };
-  return quic_conn_protect(c, quic_stream_close_body, &a);
-}
-
-static VALUE quic_stream_reset_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->reset = true;
-  s->close_app_error_code = a->app_error_code;
-  s->close_has_app_error_code = true;
-  return Qnil;
+  if (c->handler)
+    return quic_handler_stream_close(c, conn, flags, stream_id, app_error_code);
+  return quic_stream_on_close(c, stream_user_data, stream_id, flags,
+                              app_error_code);
 }
 
 static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
                                 uint64_t final_size, uint64_t app_error_code,
                                 void *user_data, void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) {
-    return c->handler->stream_reset(c->handler_ud, stream_id, final_size,
-                                    app_error_code) < 0
-               ? NGTCP2_ERR_CALLBACK_FAILURE
-               : 0;
-  }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
-  return quic_conn_protect(c, quic_stream_reset_body, &a);
-}
-
-/* Nothing queued on the stream can go out any more: have #write_pkt skip
-   it from now on. The send buffer stays until the stream closes. On
-   STOP_SENDING ngtcp2 calls recv_stop_sending before it drops the frames
-   it queued for the stream, which still point into the buffer, and should
-   it fail in between it keeps them. */
-static void quic_stream_stop(quic_stream_t *s) {
-  if (s->stopped)
-    return;
-  s->stopped = true;
-}
-
-static VALUE quic_recv_stop_sending_body(VALUE arg) {
-  struct quic_stream_cb_args *a = (struct quic_stream_cb_args *)arg;
-  VALUE stream = quic_conn_lookup_stream(a->c, a->stream_id);
-  if (NIL_P(stream))
-    return Qnil;
-
-  quic_stream_t *s;
-  TypedData_Get_Struct(stream, quic_stream_t, &quic_stream_data_type, s);
-  s->stop_app_error_code = a->app_error_code;
-  quic_stream_stop(s);
-  return Qnil;
+  if (c->handler)
+    return quic_handler_stream_reset(c, stream_id, final_size, app_error_code);
+  quic_stream_on_reset(stream_user_data, app_error_code);
+  return 0;
 }
 
 /* The peer sent STOP_SENDING. ngtcp2 shuts the send side and sends
-   RESET_STREAM itself once this returns. A stream handler hears of it here
-   (recv_stop_sending). One built against ABI 1.0 lacks that member, and
-   learns of it only when #write_pkt finds the send side shut
-   (stream_shut_write) or the stream closes. */
+   RESET_STREAM itself once this returns. */
 static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                      uint64_t app_error_code, void *user_data,
                                      void *stream_user_data) {
   (void)conn;
-  (void)stream_user_data;
   quic_conn_t *c = (quic_conn_t *)user_data;
-  if (c->handler) {
-    if (!QUIC_EXT_HANDLER_HAS(c->handler, recv_stop_sending))
-      return 0;
-    return c->handler->recv_stop_sending(c->handler_ud, stream_id,
-                                         app_error_code) < 0
-               ? NGTCP2_ERR_CALLBACK_FAILURE
-               : 0;
-  }
-  struct quic_stream_cb_args a = {
-      .c = c, .stream_id = stream_id, .app_error_code = app_error_code};
-  return quic_conn_protect(c, quic_recv_stop_sending_body, &a);
+  if (c->handler)
+    return quic_handler_recv_stop_sending(c, stream_id, app_error_code);
+  quic_stream_on_recv_stop_sending(c, stream_user_data, app_error_code);
+  return 0;
 }
 
 /* The callbacks below matter only to a stream handler. Without one, the
@@ -747,78 +595,6 @@ void quic_conn_fill_common_callbacks(ngtcp2_callbacks *callbacks) {
   callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
-/* Find the first stream in @streams that has either pending bytes or a
-   pending FIN to flush (linear scan, first match, no round-robin), and
-   what it has to send (quic_stream_next_send). Returns NULL if no stream
-   has anything. */
-static quic_stream_t *quic_conn_pick_send_stream(VALUE self,
-                                                 ngtcp2_vec *out_datav,
-                                                 size_t *out_datavcnt,
-                                                 uint32_t *out_flags) {
-  VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  VALUE stream_values = rb_funcall(streams, rb_intern("values"), 0);
-
-  for (long i = 0; i < RARRAY_LEN(stream_values); i++) {
-    VALUE st = RARRAY_AREF(stream_values, i);
-    quic_stream_t *s;
-    TypedData_Get_Struct(st, quic_stream_t, &quic_stream_data_type, s);
-    if (quic_stream_next_send(s, out_datav, out_datavcnt, out_flags))
-      return s;
-  }
-  return NULL;
-}
-
-/* #write_pkt for the QUIC::Stream mode. If any stream has pending bytes or
-   a pending FIN, route the packet through ngtcp2_conn_writev_stream so the
-   stream data gets framed alongside connection-level frames. Falls back to
-   conn-only when no stream is queued. Returns what ngtcp2 returned. */
-static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
-                                                ngtcp2_path *path,
-                                                ngtcp2_pkt_info *pi,
-                                                uint8_t *dest, size_t destlen) {
-  ngtcp2_vec datav;
-  size_t datavcnt = 0;
-  uint32_t writev_flags = 0;
-  quic_stream_t *selected =
-      quic_conn_pick_send_stream(self, &datav, &datavcnt, &writev_flags);
-
-  ngtcp2_ssize pdatalen = -1;
-  ngtcp2_ssize n = ngtcp2_conn_writev_stream(
-      c->conn, path, pi, dest, destlen, &pdatalen, writev_flags,
-      selected != NULL ? selected->stream_id : -1, &datav, datavcnt, c->now);
-
-  if ((n == NGTCP2_ERR_STREAM_DATA_BLOCKED || n == NGTCP2_ERR_STREAM_SHUT_WR) &&
-      NIL_P(c->pending_exc)) {
-    /* DATA_BLOCKED: the stream's queued data is beyond what the peer's flow
-       control lets through right now. Keep it queued; it follows once the
-       peer extends its window (MAX_STREAM_DATA / MAX_DATA).
-       SHUT_WR: ngtcp2 shut the stream's send side without recv_stop_sending
-       marking the stream, as #reset does. What is queued can never go out,
-       so stop the stream.
-       Either way, build the packet without the stream's data, so that ACKs
-       and other frames still go out. */
-    if (n == NGTCP2_ERR_STREAM_SHUT_WR)
-      quic_stream_stop(selected);
-    selected = NULL;
-    datavcnt = 0;
-    writev_flags = 0;
-    pdatalen = -1;
-    n = ngtcp2_conn_writev_stream(c->conn, path, pi, dest, destlen, &pdatalen,
-                                  0, -1, NULL, 0, c->now);
-  }
-
-  if (n < 0 || !NIL_P(c->pending_exc))
-    return n;
-
-  /* pdatalen >= 0 means ngtcp2 framed that many data bytes into the packet;
-     if 0, no data was framed (but the packet may still contain ACK or other
-     frames). */
-  if (selected != NULL)
-    quic_stream_sent(selected, datavcnt > 0 ? datav.len : 0, writev_flags,
-                     pdatalen, n);
-  return n;
-}
-
 /* The number of vectors #write_pkt asks a stream handler for per packet. */
 #define QUIC_HANDLER_VECCNT 16
 
@@ -883,8 +659,8 @@ ngtcp2_ssize quic_conn_write_pkt_raw(VALUE self, quic_conn_t *c,
   c->now = quic_now();
   return c->handler ? quic_conn_write_pkt_handler(c, path, &pi, dest,
                                                   QUIC_WRITE_PKT_BUFLEN)
-                    : quic_conn_write_pkt_streams(self, c, path, &pi, dest,
-                                                  QUIC_WRITE_PKT_BUFLEN);
+                    : quic_streams_write_pkt(self, c, path, &pi, dest,
+                                             QUIC_WRITE_PKT_BUFLEN);
 }
 
 static VALUE quic_conn_write_pkt(int argc, VALUE *argv, VALUE self) {
@@ -1094,11 +870,7 @@ static VALUE quic_conn_open_bidi_stream(VALUE self) {
   int rv = ngtcp2_conn_open_bidi_stream(c->conn, &stream_id, NULL);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
-
-  VALUE stream = quic_stream_new(stream_id, self);
-  VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  rb_hash_aset(streams, LL2NUM(stream_id), stream);
-  return stream;
+  return quic_stream_open_local(self, c, stream_id);
 }
 
 static VALUE quic_conn_open_uni_stream(VALUE self) {
@@ -1109,39 +881,26 @@ static VALUE quic_conn_open_uni_stream(VALUE self) {
   int rv = ngtcp2_conn_open_uni_stream(c->conn, &stream_id, NULL);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
-
-  VALUE stream = quic_stream_new(stream_id, self);
-  VALUE streams = rb_ivar_get(self, rb_intern("@streams"));
-  rb_hash_aset(streams, LL2NUM(stream_id), stream);
-  return stream;
+  return quic_stream_open_local(self, c, stream_id);
 }
 
-/* Send an application CONNECTION_CLOSE (frame type 0x1d) to the peer and
-   transition the underlying ngtcp2_conn to the closing period. One UDP
-   datagram is written to the bound socket, once: nothing sends it again
-   for packets the peer keeps sending (an Endpoint does, for its own
-   connections), and #write_pkt raises QUIC::Error::Closed from here on.
-   Calling #close on a connection that is already in the closing or
-   draining period is a no-op (= returns nil without doing any I/O). */
-static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
-  VALUE opts = Qnil;
-  rb_scan_args(argc, argv, "0:", &opts);
-
-  uint64_t error_code = 0;
+/* #_close(error_code, reason), behind Pump#close: build an application
+   CONNECTION_CLOSE (frame type 0x1d) carrying error_code (nil: 0) and
+   reason (nil: none), and transition the underlying ngtcp2_conn to the
+   closing period. Returns the packet, for Pump#close to send through the
+   bound socket once: nothing sends it again for packets the peer keeps
+   sending (an Endpoint does, for its own connections), and #write_pkt
+   raises QUIC::Error::Closed from here on. Returns nil when there is
+   nothing to send: the connection is already in the closing or draining
+   period, it is an Endpoint's, or ngtcp2 could not build the packet. */
+static VALUE quic_conn_close_m(VALUE self, VALUE error_code_v, VALUE reason_v) {
+  uint64_t error_code = NIL_P(error_code_v) ? 0 : NUM2ULL(error_code_v);
   const uint8_t *reason_ptr = (const uint8_t *)"";
   size_t reason_len = 0;
-
-  if (!NIL_P(opts)) {
-    VALUE error_code_v = rb_hash_aref(opts, ID2SYM(rb_intern("error_code")));
-    VALUE reason_v = rb_hash_aref(opts, ID2SYM(rb_intern("reason")));
-    if (!NIL_P(error_code_v)) {
-      error_code = NUM2ULL(error_code_v);
-    }
-    if (!NIL_P(reason_v)) {
-      Check_Type(reason_v, T_STRING);
-      reason_ptr = (const uint8_t *)RSTRING_PTR(reason_v);
-      reason_len = (size_t)RSTRING_LEN(reason_v);
-    }
+  if (!NIL_P(reason_v)) {
+    Check_Type(reason_v, T_STRING);
+    reason_ptr = (const uint8_t *)RSTRING_PTR(reason_v);
+    reason_len = (size_t)RSTRING_LEN(reason_v);
   }
 
   quic_conn_t *c = quic_conn_get(self);
@@ -1166,8 +925,9 @@ static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
     return Qnil;
   }
 
-  VALUE sock = rb_ivar_get(self, rb_intern("@sock"));
-  if (NIL_P(sock)) {
+  /* Checked here, not by Pump#close, so that it comes after the cases
+     above, which need no socket. */
+  if (NIL_P(rb_ivar_get(self, rb_intern("@sock")))) {
     rb_raise(rb_eQUICErrorNotBound,
              "%" PRIsVALUE "#bind(sock) has not been called",
              rb_obj_class(self));
@@ -1210,8 +970,7 @@ static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
   }
 
   rb_str_set_len(buffer, n);
-  rb_funcall(sock, rb_intern("send"), 2, buffer, INT2NUM(0));
-  return Qnil;
+  return buffer;
 }
 
 /* Why an Endpoint closed this connection; see quic_conn_t.error. Always nil
@@ -1233,6 +992,8 @@ void quic_conn_define_shared_methods(VALUE klass) {
                    0);
   rb_define_method(klass, "open_bidi_stream", quic_conn_open_bidi_stream, 0);
   rb_define_method(klass, "open_uni_stream", quic_conn_open_uni_stream, 0);
-  rb_define_method(klass, "close", quic_conn_close_m, -1);
+  /* #close itself is Pump's (lib/quic/connection.rb), which sends what
+     #_close returns; defining it here would hide Pump's. */
+  rb_define_private_method(klass, "_close", quic_conn_close_m, 2);
   rb_define_method(klass, "error", quic_conn_error_m, 0);
 }

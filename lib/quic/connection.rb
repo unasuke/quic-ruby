@@ -108,6 +108,17 @@ module QUIC
         stream
       end
 
+      # Send an application CONNECTION_CLOSE carrying error_code and reason and
+      # enter the closing period. Raises QUIC::Error::NotBound unless #bind was
+      # called, except on a connection an Endpoint made, whose CONNECTION_CLOSE
+      # goes out through Endpoint#write_pkt. A no-op once the connection is
+      # closing or draining.
+      def close(error_code: 0, reason: nil)
+        packet = _close(error_code, reason)
+        @sock.send(packet, 0) if packet
+        nil
+      end
+
       private
 
       # A C stream handler (quic/ext.h) registered on the connection owns
