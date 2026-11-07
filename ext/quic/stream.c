@@ -102,6 +102,10 @@ static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
   long len = RSTRING_LEN(data);
 
   if (len > 0) {
+    /* A bare Stream has no connection to count its bytes against. */
+    VALUE client_v = rb_ivar_get(self, rb_intern("@client"));
+    quic_conn_t *c = NIL_P(client_v) ? NULL : quic_conn_get(client_v);
+
     /* len is a long, so the header cannot overflow size_t. */
     size_t size = offsetof(quic_send_chunk, data) + (size_t)len;
     quic_send_chunk *chunk = (quic_send_chunk *)xmalloc(size);
@@ -121,6 +125,8 @@ static VALUE quic_stream_enqueue(VALUE self, VALUE data, bool fin) {
     }
     s->queued_offset += (uint64_t)len;
     s->buffered += size;
+    if (c != NULL)
+      c->stream_unsent += (uint64_t)len;
   }
 
   if (fin) {
@@ -140,20 +146,22 @@ static bool quic_stream_fin_kwarg(int argc, VALUE *argv, VALUE *data) {
 }
 
 /* Return the effective send window for this stream: the smaller of the
-   per-stream and the per-connection flow control limits ngtcp2 tracks, less
-   the bytes already queued but not yet handed to ngtcp2. ngtcp2 only counts
-   what it has sent, so without the subtraction a run of writes could queue
-   far more than the peer allows. Callers check the stream is writable
-   first. */
+   per-stream and the per-connection flow control limits ngtcp2 tracks,
+   each less the bytes already queued against it but not yet handed to
+   ngtcp2 (this stream's, and every stream's of the connection). ngtcp2 only
+   counts what it has sent, so without the subtraction a run of writes could
+   queue far more than the peer allows. Callers check the stream is
+   writable first. */
 static uint64_t quic_stream_window_left(VALUE client_v, quic_stream_t *s) {
-  ngtcp2_conn *conn = quic_conn_ptr(client_v);
+  quic_conn_t *c = quic_conn_get(client_v);
   uint64_t stream_left =
-      ngtcp2_conn_get_max_stream_data_left2(conn, s->stream_id);
-  uint64_t conn_left = ngtcp2_conn_get_max_data_left2(conn);
-  uint64_t left = stream_left < conn_left ? stream_left : conn_left;
+      ngtcp2_conn_get_max_stream_data_left2(c->conn, s->stream_id);
+  uint64_t conn_left = ngtcp2_conn_get_max_data_left2(c->conn);
 
   uint64_t unsent = s->queued_offset - s->sent_offset;
-  return left > unsent ? left - unsent : 0;
+  stream_left = stream_left > unsent ? stream_left - unsent : 0;
+  conn_left = conn_left > c->stream_unsent ? conn_left - c->stream_unsent : 0;
+  return stream_left < conn_left ? stream_left : conn_left;
 }
 
 bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
@@ -184,10 +192,11 @@ bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
   return false;
 }
 
-void quic_stream_sent(quic_stream_t *s, size_t datalen, uint32_t flags,
-                      ngtcp2_ssize pdatalen, ngtcp2_ssize n) {
+void quic_stream_sent(quic_conn_t *c, quic_stream_t *s, size_t datalen,
+                      uint32_t flags, ngtcp2_ssize pdatalen, ngtcp2_ssize n) {
   if (pdatalen > 0) {
     s->sent_offset += (uint64_t)pdatalen;
+    c->stream_unsent -= (uint64_t)pdatalen;
     s->send_next_off += (size_t)pdatalen;
     /* Leave send_next on no fully handed over chunk: an acknowledgement
        of all that was sent would free it under us. */
@@ -203,6 +212,18 @@ void quic_stream_sent(quic_stream_t *s, size_t datalen, uint32_t flags,
     /* FIN-only packet (no data) was successfully written. */
     s->fin_flushed = true;
   }
+}
+
+/* The send buffer stays until the stream closes. On STOP_SENDING ngtcp2
+   calls recv_stop_sending before it drops the frames it queued for the
+   stream, which still point into the buffer, and should it fail in between
+   it keeps them. */
+void quic_stream_stop(quic_conn_t *c, quic_stream_t *s) {
+  if (s->stopped)
+    return;
+  s->stopped = true;
+  if (c != NULL)
+    c->stream_unsent -= s->queued_offset - s->sent_offset;
 }
 
 void quic_stream_release_acked(quic_stream_t *s, uint64_t offset,
@@ -431,11 +452,15 @@ static VALUE quic_stream_reset_m(int argc, VALUE *argv, VALUE self) {
     return Qnil;
   }
 
-  ngtcp2_conn *conn = quic_conn_ptr(client_v);
-  int rv = ngtcp2_conn_shutdown_stream_write(conn, 0, s->stream_id, error_code);
+  quic_conn_t *c = quic_conn_get(client_v);
+  int rv =
+      ngtcp2_conn_shutdown_stream_write(c->conn, 0, s->stream_id, error_code);
   if (rv != 0)
     quic_raise_ngtcp2_error(rv);
   s->reset = true;
+  /* Now, not at the next #write_pkt: until then, what it had queued would
+     keep the other streams' #write_nonblock out of the window. */
+  quic_stream_stop(c, s);
   return Qnil;
 }
 

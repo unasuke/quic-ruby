@@ -1,6 +1,7 @@
 #ifndef QUIC_STREAM_H
 #define QUIC_STREAM_H 1
 
+#include "connection_common.h"
 #include "quic.h"
 
 extern VALUE rb_cQUICStream;
@@ -51,10 +52,12 @@ typedef struct {
   bool closed;       /* stream_close callback fired */
   uint64_t close_app_error_code;
   bool close_has_app_error_code;
-  /* The send side is shut: the peer's STOP_SENDING arrived, or ngtcp2
-     reported the send side shut while writing. Nothing queued goes out any
-     more, and #write_pkt skips the stream. The send buffer stays until the
-     stream closes: ngtcp2 may still hold pointers into it at this point
+  /* The send side is shut (quic_stream_stop): the peer's STOP_SENDING
+     arrived, #reset was called, ngtcp2 reported the send side shut while
+     writing, or the stream closed. Nothing queued goes out any more,
+     #write_pkt skips the stream, and what it had not sent no longer counts
+     in quic_conn_t.stream_unsent. The send buffer stays until the stream
+     closes: ngtcp2 may still hold pointers into it at this point
      (recv_stop_sending runs before it drops the stream's queued frames). */
   bool stopped;
   uint64_t stop_app_error_code; /* the STOP_SENDING's, 0 if none arrived */
@@ -85,11 +88,15 @@ VALUE quic_stream_new(int64_t stream_id, VALUE owner);
 bool quic_stream_next_send(const quic_stream_t *s, ngtcp2_vec *datav,
                            size_t *datavcnt, uint32_t *flags);
 
-/* Account for a packet ngtcp2_conn_writev_stream built from what
+/* Account for a packet ngtcp2_conn_writev_stream built for c from what
    quic_stream_next_send offered: datalen bytes (0 for a FIN alone) with
    flags, of which ngtcp2 framed pdatalen, in a packet of n bytes. */
-void quic_stream_sent(quic_stream_t *s, size_t datalen, uint32_t flags,
-                      ngtcp2_ssize pdatalen, ngtcp2_ssize n);
+void quic_stream_sent(quic_conn_t *c, quic_stream_t *s, size_t datalen,
+                      uint32_t flags, ngtcp2_ssize pdatalen, ngtcp2_ssize n);
+
+/* Shut the send side of s, a stream of c (NULL for a bare Stream): nothing
+   it has queued goes out any more. Does nothing the second time. */
+void quic_stream_stop(quic_conn_t *c, quic_stream_t *s);
 
 /* The peer acknowledged [offset, offset + datalen): free the chunks that
    end at or before offset + datalen. */

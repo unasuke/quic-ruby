@@ -394,6 +394,30 @@ class TestQUICEndpoint < Minitest::Test
     assert_equal "pong", reply
   end
 
+  # The connection's flow control window is shared by its streams: what one
+  # stream has queued and not sent leaves that much less for the others.
+  def test_queued_bytes_of_every_stream_count_against_the_connection_window
+    net = endpoint_network(tls_context, transport_params: QUIC::TransportParams.default.with(initial_max_data: 1_000))
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? }
+
+    assert_equal 1_000, client.open_bidi_stream.write_nonblock("a" * 2_000)
+    assert_raises(QUIC::Error::WaitWritable) { client.open_bidi_stream.write_nonblock("b") }
+  end
+
+  # What a reset stream had queued goes back to the connection's window at
+  # once, not at the next #write_pkt.
+  def test_reset_returns_its_queued_bytes_to_the_connection_window
+    net = endpoint_network(tls_context, transport_params: QUIC::TransportParams.default.with(initial_max_data: 1_000))
+    client = net.connect(alpn: ALPN, ca_file: loopback_credentials.ca_file)
+    net.run_until { client.handshake_completed? }
+
+    stream = client.open_bidi_stream
+    assert_equal 1_000, stream.write_nonblock("a" * 1_000)
+    stream.reset
+    assert_equal 1, client.open_bidi_stream.write_nonblock("b")
+  end
+
   private
 
   def tls_context

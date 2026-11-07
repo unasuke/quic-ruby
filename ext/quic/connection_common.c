@@ -526,6 +526,8 @@ static VALUE quic_stream_close_body(VALUE arg) {
     s->close_has_app_error_code = true;
     s->close_app_error_code = a->app_error_code;
   }
+  /* Usually stopped already, or with nothing left unsent. */
+  quic_stream_stop(a->c, s);
   /* ngtcp2 never reads the stream's data again. */
   quic_stream_free_send_buffer(s);
   /* A stream still waiting in @accept_queue holds on to what it received.
@@ -593,17 +595,6 @@ static int quic_stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
   return 0;
 }
 
-/* Nothing queued on the stream can go out any more: have #write_pkt skip
-   it from now on. The send buffer stays until the stream closes. On
-   STOP_SENDING ngtcp2 calls recv_stop_sending before it drops the frames
-   it queued for the stream, which still point into the buffer, and should
-   it fail in between it keeps them. */
-static void quic_stream_stop(quic_stream_t *s) {
-  if (s->stopped)
-    return;
-  s->stopped = true;
-}
-
 /* The peer sent STOP_SENDING. ngtcp2 shuts the send side and sends
    RESET_STREAM itself once this returns. A stream handler hears of it here
    (recv_stop_sending). One built against ABI 1.0 lacks that member, and
@@ -625,7 +616,7 @@ static int quic_recv_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
   quic_stream_t *s = (quic_stream_t *)stream_user_data;
   if (s != NULL) {
     s->stop_app_error_code = app_error_code;
-    quic_stream_stop(s);
+    quic_stream_stop(c, s);
   }
   return 0;
 }
@@ -784,13 +775,13 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
     /* DATA_BLOCKED: the stream's queued data is beyond what the peer's flow
        control lets through right now. Keep it queued; it follows once the
        peer extends its window (MAX_STREAM_DATA / MAX_DATA).
-       SHUT_WR: ngtcp2 shut the stream's send side without recv_stop_sending
-       marking the stream, as #reset does. What is queued can never go out,
-       so stop the stream.
+       SHUT_WR: ngtcp2 shut the stream's send side, and neither
+       recv_stop_sending nor #reset stopped the stream. What is queued can
+       never go out, so stop it now.
        Either way, build the packet without the stream's data, so that ACKs
        and other frames still go out. */
     if (n == NGTCP2_ERR_STREAM_SHUT_WR)
-      quic_stream_stop(selected);
+      quic_stream_stop(c, selected);
     selected = NULL;
     datavcnt = 0;
     writev_flags = 0;
@@ -806,7 +797,7 @@ static ngtcp2_ssize quic_conn_write_pkt_streams(VALUE self, quic_conn_t *c,
      if 0, no data was framed (but the packet may still contain ACK or other
      frames). */
   if (selected != NULL)
-    quic_stream_sent(selected, datavcnt > 0 ? datav.len : 0, writev_flags,
+    quic_stream_sent(c, selected, datavcnt > 0 ? datav.len : 0, writev_flags,
                      pdatalen, n);
   return n;
 }

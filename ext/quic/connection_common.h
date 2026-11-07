@@ -101,6 +101,11 @@ typedef struct {
   /* Set by the constructor. Decides which peer-initiated streams
      recv_stream_data queues for #accept_stream. */
   bool is_server;
+  /* The bytes the QUIC::Streams of this connection have queued and not yet
+     handed to ngtcp2, stopped streams excepted. ngtcp2 takes off the
+     connection's flow control window only what it has sent, so #write and
+     #write_nonblock take this off as well. */
+  uint64_t stream_unsent;
   /* <qlog_dir>/<SCID>.sqlog while ngtcp2 writes qlog to it, else NULL.
      quic_conn_close_qlog closes it as soon as the connection ends;
      NGTCP2_QLOG_WRITE_FLAG_FIN, sent by ngtcp2_conn_del, closes one still
