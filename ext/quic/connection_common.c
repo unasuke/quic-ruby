@@ -884,32 +884,23 @@ static VALUE quic_conn_open_uni_stream(VALUE self) {
   return quic_stream_open_local(self, c, stream_id);
 }
 
-/* Send an application CONNECTION_CLOSE (frame type 0x1d) to the peer and
-   transition the underlying ngtcp2_conn to the closing period. One UDP
-   datagram is written to the bound socket, once: nothing sends it again
-   for packets the peer keeps sending (an Endpoint does, for its own
-   connections), and #write_pkt raises QUIC::Error::Closed from here on.
-   Calling #close on a connection that is already in the closing or
-   draining period is a no-op (= returns nil without doing any I/O). */
-static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
-  VALUE opts = Qnil;
-  rb_scan_args(argc, argv, "0:", &opts);
-
-  uint64_t error_code = 0;
+/* #_close(error_code, reason), behind Pump#close: build an application
+   CONNECTION_CLOSE (frame type 0x1d) carrying error_code (nil: 0) and
+   reason (nil: none), and transition the underlying ngtcp2_conn to the
+   closing period. Returns the packet, for Pump#close to send through the
+   bound socket once: nothing sends it again for packets the peer keeps
+   sending (an Endpoint does, for its own connections), and #write_pkt
+   raises QUIC::Error::Closed from here on. Returns nil when there is
+   nothing to send: the connection is already in the closing or draining
+   period, it is an Endpoint's, or ngtcp2 could not build the packet. */
+static VALUE quic_conn_close_m(VALUE self, VALUE error_code_v, VALUE reason_v) {
+  uint64_t error_code = NIL_P(error_code_v) ? 0 : NUM2ULL(error_code_v);
   const uint8_t *reason_ptr = (const uint8_t *)"";
   size_t reason_len = 0;
-
-  if (!NIL_P(opts)) {
-    VALUE error_code_v = rb_hash_aref(opts, ID2SYM(rb_intern("error_code")));
-    VALUE reason_v = rb_hash_aref(opts, ID2SYM(rb_intern("reason")));
-    if (!NIL_P(error_code_v)) {
-      error_code = NUM2ULL(error_code_v);
-    }
-    if (!NIL_P(reason_v)) {
-      Check_Type(reason_v, T_STRING);
-      reason_ptr = (const uint8_t *)RSTRING_PTR(reason_v);
-      reason_len = (size_t)RSTRING_LEN(reason_v);
-    }
+  if (!NIL_P(reason_v)) {
+    Check_Type(reason_v, T_STRING);
+    reason_ptr = (const uint8_t *)RSTRING_PTR(reason_v);
+    reason_len = (size_t)RSTRING_LEN(reason_v);
   }
 
   quic_conn_t *c = quic_conn_get(self);
@@ -934,8 +925,9 @@ static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
     return Qnil;
   }
 
-  VALUE sock = rb_ivar_get(self, rb_intern("@sock"));
-  if (NIL_P(sock)) {
+  /* Checked here, not by Pump#close, so that it comes after the cases
+     above, which need no socket. */
+  if (NIL_P(rb_ivar_get(self, rb_intern("@sock")))) {
     rb_raise(rb_eQUICErrorNotBound,
              "%" PRIsVALUE "#bind(sock) has not been called",
              rb_obj_class(self));
@@ -978,8 +970,7 @@ static VALUE quic_conn_close_m(int argc, VALUE *argv, VALUE self) {
   }
 
   rb_str_set_len(buffer, n);
-  rb_funcall(sock, rb_intern("send"), 2, buffer, INT2NUM(0));
-  return Qnil;
+  return buffer;
 }
 
 /* Why an Endpoint closed this connection; see quic_conn_t.error. Always nil
@@ -1001,6 +992,8 @@ void quic_conn_define_shared_methods(VALUE klass) {
                    0);
   rb_define_method(klass, "open_bidi_stream", quic_conn_open_bidi_stream, 0);
   rb_define_method(klass, "open_uni_stream", quic_conn_open_uni_stream, 0);
-  rb_define_method(klass, "close", quic_conn_close_m, -1);
+  /* #close itself is Pump's (lib/quic/connection.rb), which sends what
+     #_close returns; defining it here would hide Pump's. */
+  rb_define_private_method(klass, "_close", quic_conn_close_m, 2);
   rb_define_method(klass, "error", quic_conn_error_m, 0);
 }

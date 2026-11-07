@@ -378,6 +378,11 @@ class TestQUICClient < Minitest::Test
     end
   end
 
+  def test_close_rejects_unknown_keywords
+    client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
+    assert_raises(ArgumentError) { client.close(bogus: 1) }
+  end
+
   def test_client_close_is_noop_when_already_closed
     client = QUIC::Connection::Client.new(host: "127.0.0.1", port: 443)
     sock = UDPSocket.new
