@@ -16,7 +16,7 @@ jobs:
           - '4.0'
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install build dependencies
@@ -24,12 +24,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y autoconf automake libtool pkg-config build-essential libssl-dev
       - name: Set up Ruby
-        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        uses: ruby/setup-ruby@v1.338.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
       - name: Cache vendored ports
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@v6.1.0
         with:
           path: tmp
           key: ports-${{ runner.os }}-ruby-${{ matrix.ruby }}-ngtcp2-1.26.0-picotls-a2d95de-${{ hashFiles('ext/quic/extconf.rb', 'ext/quic/patches/**') }}
